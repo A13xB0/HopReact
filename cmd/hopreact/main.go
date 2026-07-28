@@ -121,6 +121,28 @@ func main() {
 		defer drainTicker.Stop()
 		go nt.Run(ctx, drainTicker.C)
 		go runMembershipChecks(ctx, st, dc, log)
+
+		// A bot is shown online only while it holds a Gateway connection —
+		// REST calls alone leave it greyed out however healthy the process
+		// is. Running one turns the member list into a free liveness
+		// indicator: green means this process is up and talking to Discord.
+		// Deliberately best-effort; presence never affects alerting.
+		gw := &discord.Gateway{
+			BotToken: cfg.Discord.BotToken,
+			Log:      log,
+			Status: func() string {
+				n, err := st.CountTargets(ctx)
+				if err != nil || n == 0 {
+					return "the mesh"
+				}
+				w, err := st.CountWatches(ctx)
+				if err != nil || w == 0 {
+					return fmt.Sprintf("%d nodes", n)
+				}
+				return fmt.Sprintf("%d nodes · %d watched", n, w)
+			},
+		}
+		go gw.Run(ctx)
 	}
 	go runHousekeeping(ctx, st, log)
 
