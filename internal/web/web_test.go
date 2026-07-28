@@ -3,6 +3,7 @@ package web
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"io"
 	"log/slog"
 	"net/http"
@@ -634,5 +635,106 @@ func TestUnknownTypesAreDropped(t *testing.T) {
 		if len(r.Types) != 1 || r.Types[0] != 4 {
 			t.Errorf("types = %v, want only the real one [4]", r.Types)
 		}
+	}
+}
+
+// ---------------------------------------------------------- feed banner --
+
+func insertPoll(t *testing.T, st *store.Store, at time.Time, status store.PollStatus, errText string) {
+	t.Helper()
+	ctx := context.Background()
+	if err := st.WriteTx(ctx, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx,
+			`INSERT INTO poll_runs (started_at, finished_at, status, node_count, error)
+			 VALUES (?,?,?,?,?)`, at.Unix(), at.Unix(), string(status), 778, errText)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// One failed poll is not news. The upstream is someone else's public API
+// behind a DNS lookup and the occasional blip is routine; a single miss
+// delays detection by one interval and nothing else. Shouting about it trains
+// people to ignore the banner, which is expensive the day it matters.
+func TestOneFailedPollDoesNotRaiseTheBanner(t *testing.T) {
+	srv, st, h := newServer(t)
+	cookie, _, _ := signIn(t, srv, st)
+
+	insertPoll(t, st, t0.Add(-10*time.Minute), store.PollOK, "")
+	insertPoll(t, st, t0.Add(-5*time.Minute), store.PollOK, "")
+	insertPoll(t, st, t0, store.PollFailed,
+		`dial tcp: lookup scotmesh-corescope on 127.0.0.11:53: server misbehaving`)
+
+	req := httptest.NewRequest(http.MethodGet, "/watches", nil)
+	req.AddCookie(cookie)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	body := rec.Body.String()
+	if strings.Contains(body, "Upstream data is stale") {
+		t.Error("a single failed poll should not raise the stale banner")
+	}
+	if strings.Contains(body, "127.0.0.11:53") {
+		t.Error("a raw Go dial error must never reach the page")
+	}
+}
+
+// A feed that has genuinely stopped must still be reported — plainly, and
+// without the networking stack's own words.
+func TestSustainedOutageRaisesAReadableBanner(t *testing.T) {
+	srv, st, h := newServer(t)
+	cookie, _, _ := signIn(t, srv, st)
+
+	insertPoll(t, st, t0.Add(-2*time.Hour), store.PollOK, "")
+	for i := 4; i >= 1; i-- {
+		insertPoll(t, st, t0.Add(-time.Duration(i)*5*time.Minute), store.PollFailed,
+			`dial tcp: lookup scotmesh-corescope on 127.0.0.11:53: server misbehaving`)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/watches", nil)
+	req.AddCookie(cookie)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	body := rec.Body.String()
+	if !strings.Contains(body, "can&#39;t reach the mesh data feed") &&
+		!strings.Contains(body, "can't reach the mesh data feed") {
+		t.Errorf("a sustained outage should be reported in plain words, got:\n%s", body)
+	}
+	if strings.Contains(body, "127.0.0.11:53") || strings.Contains(body, "dial tcp") {
+		t.Error("the raw Go error must stay in poll_runs, not go on the page")
+	}
+	// It must also say the user's own nodes are not the problem.
+	if !strings.Contains(body, "nothing has gone wrong with your nodes") {
+		t.Error("the banner should make clear this is our problem, not theirs")
+	}
+}
+
+// A suspect poll's reason is written for people ("only 5 nodes returned,
+// below the floor of 100") and is worth showing.
+func TestSuspectFeedShowsItsReason(t *testing.T) {
+	srv, st, h := newServer(t)
+	cookie, _, _ := signIn(t, srv, st)
+	ctx := context.Background()
+
+	insertPoll(t, st, t0.Add(-2*time.Hour), store.PollOK, "")
+	if err := st.WriteTx(ctx, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx,
+			`INSERT INTO poll_runs (started_at, status, suppressed_reason)
+			 VALUES (?, 'suspect', 'only 5 nodes returned, below the floor of 100')`,
+			t0.Unix())
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/watches", nil)
+	req.AddCookie(cookie)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if !strings.Contains(rec.Body.String(), "below the floor of 100") {
+		t.Error("a suspect poll's human-readable reason should be shown")
 	}
 }

@@ -801,30 +801,67 @@ func (s *Server) handleDeleteAccount(w http.ResponseWriter, r *http.Request) {
 // feedHealth summarises whether the upstream data can currently be trusted.
 // Shown as a banner: someone looking at a page of green rows deserves to
 // know if it is actually stale.
+// staleAfterPolls is how many checks must be missed before the dashboard says
+// anything.
+//
+// One failed poll is not news. The upstream is someone else's public API on
+// the far side of a DNS lookup, and the occasional blip is routine — a single
+// miss delays detection by five minutes and nothing else. Shouting about it
+// trains people to ignore the banner, which is expensive the day it matters.
+const staleAfterPolls = 3
+
 func (s *Server) feedHealth(r *http.Request) feedHealth {
+	ctx := r.Context()
 	fh := feedHealth{Healthy: true}
-	runs, err := s.Store.RecentPollRuns(r.Context(), 5)
-	if err != nil || len(runs) == 0 {
+	fh.TargetsKn, _ = s.Store.CountTargets(ctx)
+
+	lastOK, err := s.Store.LastOKPollAt(ctx)
+	if err != nil {
+		return fh // can't tell; don't invent a problem
+	}
+	fh.LastOK = lastOK
+
+	if lastOK.IsZero() {
 		fh.Healthy = false
-		fh.Reason = "No successful poll yet."
+		fh.Reason = "HopReact hasn't managed a successful check yet, so nothing below is up to date."
 		return fh
 	}
-	latest := runs[0]
-	if latest.Status != store.PollOK {
-		fh.Healthy = false
-		fh.Reason = latest.SuppressedReason
-		if fh.Reason == "" {
-			fh.Reason = latest.Error
-		}
+
+	tolerance := time.Duration(staleAfterPolls) * s.Cfg.Poll.Interval
+	if s.Store.Now().UTC().Sub(lastOK) <= tolerance {
+		return fh
 	}
-	for _, run := range runs {
-		if run.Status == store.PollOK {
-			fh.LastOK = run.StartedAt
-			break
-		}
+
+	fh.Healthy = false
+	runs, err := s.Store.RecentPollRuns(ctx, 1)
+	if err != nil || len(runs) == 0 {
+		fh.Reason = "The mesh data feed has stopped updating."
+		return fh
 	}
-	fh.TargetsKn, _ = s.Store.CountTargets(r.Context())
+	fh.Reason = stateOfFeed(runs[0])
 	return fh
+}
+
+// stateOfFeed turns a failed poll into something worth showing a person.
+//
+// Deliberately does NOT surface run.Error. That field holds whatever Go's
+// networking stack produced — "dial tcp: lookup … on 127.0.0.11:53: server
+// misbehaving" — which tells a visitor nothing they can act on and reads like
+// the site is broken. The full text stays in poll_runs for whoever is
+// debugging it.
+func stateOfFeed(run store.PollRun) string {
+	switch run.Status {
+	case store.PollFailed:
+		return "HopReact can't reach the mesh data feed at the moment. Alerts are paused until it comes back — nothing has gone wrong with your nodes."
+	case store.PollSuspect:
+		// These reasons are written for people and are worth showing: "only 5
+		// nodes returned, below the floor of 100".
+		if run.SuppressedReason != "" {
+			return "The mesh data feed looks wrong, so alerts are paused: " + run.SuppressedReason + "."
+		}
+		return "The mesh data feed looks wrong, so alerts are paused until it settles."
+	}
+	return "The mesh data feed has stopped updating."
 }
 
 // ------------------------------------------------------------- helpers ---
