@@ -4,9 +4,10 @@
 
 # HopReact
 
-Sign in with Discord, mark which repeaters and observers are yours, choose how
-many hours of silence means trouble, and HopReact's bot sends you a direct
-message when one stops being seen.
+Sign in with Discord, mark which repeaters and observers are yours, choose what
+counts as trouble — no adverts for a day, no messages for six hours, whatever
+matters to you — and HopReact's bot sends you a direct message when one goes
+quiet.
 
 It reads a public [CoreScope](https://github.com/Kpa-clawbot/CoreScope)
 instance — the same data behind
@@ -120,6 +121,11 @@ So:
 - **Never alerts on a node that has never relayed.** 189 of the repeaters on
   the live network have never appeared in a packet route; they haven't
   *stopped* doing anything.
+- **Never alerts on a rule with nothing behind it.** If we have never once
+  seen the traffic a rule asks about, that rule stays quiet. Not being able
+  to see something is not the same as it having stopped.
+- **Several rules, one message.** Three rules tripping on one node in the same
+  check is one DM with three reasons, not three DMs.
 - **Silence during our own outages.** If the upstream feed fails, returns
   implausibly little, or freezes, HopReact evaluates nothing rather than
   telling everyone their whole network died. And if a single poll would put
