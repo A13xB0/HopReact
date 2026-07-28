@@ -707,3 +707,56 @@ func TestBackfillWorksOnAnUpgradedInstallWithNoLowWaterMark(t *testing.T) {
 		t.Error("the 15-hour-old ACK should be in the table rather than reading 'never'")
 	}
 }
+
+// The follow-on from that bug, and the more instructive half.
+//
+// The ingest loop widens the cursor using every packet it examines, not every
+// packet it records. While the zero low-water mark was being misread, the
+// loop skipped thousands of old packets as already-seen and then widened the
+// cursor over them anyway — so the cursor asserted coverage the activity
+// table did not have, and clearing the backfill marker just re-ran a backfill
+// that believed on its own authority it had already done the work.
+//
+// A cursor collapsed back to a single known point must genuinely re-read.
+func TestBackfillRereadsAfterTheCursorIsRepaired(t *testing.T) {
+	h := newHarness(t, nil)
+	ctx := context.Background()
+
+	// The repaired state migration 0005 produces: low == high, marker clear.
+	if err := h.st.WriteTx(ctx, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx,
+			`UPDATE feed_cursor SET low_packet_id = 900, last_packet_id = 900, backfilled_at = 0 WHERE id = 1`)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	h.scope.setNodes(h.now, 200, time.Minute)
+	h.scope.packets = []map[string]any{
+		carriedPacket(900, corescope.TypeGRPTXT, 0, h.now.Add(-time.Minute)), // the known point
+		carriedPacket(500, corescope.TypeACK, 0, h.now.Add(-20*time.Hour)),   // older, must be read
+		advertPacket(400, 0, h.now.Add(-22*time.Hour)),                       // older still
+	}
+	h.watch(t, key(0), 6)
+	h.poll(t)
+
+	acts, err := h.st.ActivityFor(ctx, "node", key(0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	byType := map[int]store.Activity{}
+	for _, a := range acts {
+		byType[a.PayloadType] = a
+	}
+	if _, ok := byType[corescope.TypeACK]; !ok {
+		t.Error("the 20-hour-old ACK was not re-read; the cursor is still claiming coverage it lacks")
+	}
+	if _, ok := byType[corescope.TypeADVERT]; !ok {
+		t.Error("the 22-hour-old advert was not re-read")
+	}
+	// The already-known point is inside the old range and must not be
+	// double-counted on top of being re-read.
+	if a, ok := byType[corescope.TypeGRPTXT]; ok && a.EvidenceCount > 1 {
+		t.Errorf("the known packet was counted %d times, want at most 1", a.EvidenceCount)
+	}
+}

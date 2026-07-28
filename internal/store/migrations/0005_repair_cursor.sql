@@ -1,0 +1,25 @@
+-- Repair a feed cursor that claims more coverage than it has.
+--
+-- 0004 cleared the backfill marker so the fixed logic could re-read a day of
+-- history. It wasn't enough, and the reason is worth writing down because the
+-- shape of this mistake is easy to repeat.
+--
+-- The ingest loop widens the cursor using every packet it *examines*, not
+-- every packet it *records*. That is normally right — a page is processed
+-- whole, so examining and recording cover the same ids. But while the zero
+-- low-water mark was being misread as "id 0", the loop skipped thousands of
+-- genuinely old packets as already-seen and then widened the cursor to
+-- include them anyway. The cursor absorbed the lie and made it permanent:
+-- production ended up asserting it had read back to id 176977 while its
+-- activity table held barely three hours.
+--
+-- So clearing the marker just re-ran a backfill that now believed, on its own
+-- authority, that it had already done the work.
+--
+-- The only id this database can still vouch for is the newest one, so the
+-- range collapses to that single point and the backfill genuinely re-reads
+-- everything older. Evidence for the window already recorded is counted a
+-- second time; last_at is only ever moved forward, so no timestamp can be
+-- dragged backwards by this, and evidence_count is a rough indication of how
+-- much support a rule has rather than something alerting depends on.
+UPDATE feed_cursor SET low_packet_id = last_packet_id, backfilled_at = 0 WHERE id = 1;
