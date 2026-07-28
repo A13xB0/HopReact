@@ -453,3 +453,186 @@ func TestFreshnessAndKeyHelpers(t *testing.T) {
 		t.Errorf("a short key should be left alone, got %q", got)
 	}
 }
+
+// ------------------------------------------------------- rules & detail --
+
+// addWatch creates a watch through the store and returns its id.
+func addWatch(t *testing.T, st *store.Store, userID int64, key string) int64 {
+	t.Helper()
+	id, err := st.CreateWatch(context.Background(), store.Watch{
+		UserID: userID, TargetKind: "node", TargetKey: key, ThresholdHours: 6,
+	}, 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return id
+}
+
+func TestWatchDetailRenders(t *testing.T) {
+	srv, st, h := newServer(t)
+	ctx := context.Background()
+	if _, err := st.UpsertTargets(ctx, []corescope.Observation{{
+		Kind: corescope.KindNode, Key: "aa", Name: "Ben Nevis", Role: "repeater",
+		LastSeen: t0.Add(-time.Minute),
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	cookie, _, u := signIn(t, srv, st)
+	id := addWatch(t, st, u.ID, "aa")
+
+	req := httptest.NewRequest(http.MethodGet, "/watches/"+itoa(id), nil)
+	req.AddCookie(cookie)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d, want 200", rec.Code)
+	}
+	body := rec.Body.String()
+	for _, want := range []string{
+		"Ben Nevis",
+		"Adverts, responses or channel messages", // the default per-type rule
+		"Not heard at all",                       // the backstop
+		"ADVERT", "GRP_TXT",                      // the activity table
+		"Add a rule",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("detail page is missing %q", want)
+		}
+	}
+	// The honesty note is load-bearing, not decoration: without it a blank
+	// "sent" column reads as "this never happened" rather than "nobody can
+	// know this".
+	if !strings.Contains(body, "Only adverts carry their sender") {
+		t.Error("the page must explain why the sent column is blank for most types")
+	}
+}
+
+// One person must not be able to read, or attach rules to, another's watch.
+func TestCannotSeeOrEditAnotherUsersWatch(t *testing.T) {
+	srv, st, h := newServer(t)
+	ctx := context.Background()
+	other, err := st.UpsertUser(ctx, "d2", "bob", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	victim := addWatch(t, st, other.ID, "aa")
+	cookie, csrf, _ := signIn(t, srv, st)
+
+	req := httptest.NewRequest(http.MethodGet, "/watches/"+itoa(victim), nil)
+	req.AddCookie(cookie)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("GET another user's watch: status %d, want 404", rec.Code)
+	}
+
+	form := url.Values{"csrf_token": {csrf}, "threshold_hours": {"6"}, "types": {"4"}}
+	req = httptest.NewRequest(http.MethodPost, "/watches/"+itoa(victim)+"/rules",
+		strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.AddCookie(cookie)
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("POST a rule onto another user's watch: status %d, want 404", rec.Code)
+	}
+	rules, _ := st.RulesForWatch(ctx, victim)
+	for _, r := range rules {
+		if r.Source == store.SourceTypes && len(r.Types) == 1 && r.Types[0] == 4 {
+			t.Fatal("a rule was attached to another user's watch")
+		}
+	}
+}
+
+// Groups are expanded to their members on save. Storing the group name
+// instead would mean redefining a group later silently rewrites what existing
+// users are alerted on.
+func TestAddRuleStoresExpandedTypes(t *testing.T) {
+	srv, st, h := newServer(t)
+	ctx := context.Background()
+	cookie, csrf, u := signIn(t, srv, st)
+	id := addWatch(t, st, u.ID, "aa")
+
+	form := url.Values{
+		"csrf_token": {csrf}, "threshold_hours": {"12"}, "direction": {"carried"},
+		"label": {"Messaging"},
+		"types": {"2", "5", "6", "10"},
+	}
+	req := httptest.NewRequest(http.MethodPost, "/watches/"+itoa(id)+"/rules",
+		strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.AddCookie(cookie)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("status %d, want a redirect", rec.Code)
+	}
+
+	rules, _ := st.RulesForWatch(ctx, id)
+	var got *store.Rule
+	for i := range rules {
+		if rules[i].Label == "Messaging" {
+			got = &rules[i]
+		}
+	}
+	if got == nil {
+		t.Fatal("the rule was not stored")
+	}
+	if len(got.Types) != 4 || got.Types[0] != 2 || got.Types[3] != 10 {
+		t.Errorf("types = %v, want the group expanded to [2 5 6 10]", got.Types)
+	}
+	if got.Direction != store.DirCarried || got.ThresholdHours != 12 {
+		t.Errorf("direction=%q threshold=%d", got.Direction, got.ThresholdHours)
+	}
+}
+
+// A per-type rule with no types selected would match nothing and could never
+// fire, so it must be refused rather than silently stored.
+func TestRuleWithNoTypesIsRefused(t *testing.T) {
+	srv, st, h := newServer(t)
+	cookie, csrf, u := signIn(t, srv, st)
+	id := addWatch(t, st, u.ID, "aa")
+	before, _ := st.RulesForWatch(context.Background(), id)
+
+	form := url.Values{"csrf_token": {csrf}, "threshold_hours": {"6"}}
+	req := httptest.NewRequest(http.MethodPost, "/watches/"+itoa(id)+"/rules",
+		strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.AddCookie(cookie)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	after, _ := st.RulesForWatch(context.Background(), id)
+	if len(after) != len(before) {
+		t.Errorf("rules went from %d to %d; an empty rule must be refused", len(before), len(after))
+	}
+}
+
+// An unknown payload type would match nothing, so it is dropped rather than
+// stored as a rule that can never fire.
+func TestUnknownTypesAreDropped(t *testing.T) {
+	srv, st, h := newServer(t)
+	cookie, csrf, u := signIn(t, srv, st)
+	id := addWatch(t, st, u.ID, "aa")
+
+	form := url.Values{
+		"csrf_token": {csrf}, "threshold_hours": {"6"},
+		"label": {"Mixed"}, "types": {"4", "99", "13"},
+	}
+	req := httptest.NewRequest(http.MethodPost, "/watches/"+itoa(id)+"/rules",
+		strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.AddCookie(cookie)
+	h.ServeHTTP(httptest.NewRecorder(), req)
+
+	rules, _ := st.RulesForWatch(context.Background(), id)
+	for _, r := range rules {
+		if r.Label != "Mixed" {
+			continue
+		}
+		if len(r.Types) != 1 || r.Types[0] != 4 {
+			t.Errorf("types = %v, want only the real one [4]", r.Types)
+		}
+	}
+}

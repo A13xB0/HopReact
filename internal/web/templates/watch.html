@@ -1,0 +1,232 @@
+{{define "content"}}
+{{$w := .Watch}}
+{{$muted := and (not $w.Watch.MutedUntil.IsZero) ($w.Watch.MutedUntil.After $.Now)}}
+
+<div class="card">
+  <div class="row spread" style="margin-bottom:.5rem">
+    <h2 style="margin:0">
+      {{if and $w.Target $w.Target.Name}}{{$w.Target.Name}}
+      {{else}}<span class="small">(unnamed)</span>{{end}}
+    </h2>
+    <a class="btn secondary" href="/watches">Back</a>
+  </div>
+  <div class="node-meta">
+    {{if eq $w.Watch.TargetKind "observer"}}<span class="tag observer">observer</span>
+    {{else}}<span class="tag">{{if and $w.Target $w.Target.Role}}{{$w.Target.Role}}{{else}}node{{end}}</span>{{end}}
+    {{if $w.Target}}
+      <span class="pill {{freshClass $w.Target.LastSeen $.Now}}"><span class="dot"></span>seen {{since $w.Target.LastSeen $.Now}}</span>
+    {{end}}
+    {{if $muted}}<span class="pill muted"><span class="dot"></span>muted until {{stamp $w.Watch.MutedUntil}}</span>{{end}}
+  </div>
+  <div class="node-key mono" title="{{$w.Watch.TargetKey}}">{{shortKey $w.Watch.TargetKey}}</div>
+</div>
+
+{{/* ------------------------------------------------------------ rules -- */}}
+<div class="card">
+  <h3>When to tell you</h3>
+  <p class="small" style="margin:.2rem 0 .9rem">
+    Rules are independent: if any one of them goes over, you get a message.
+    Several going over in the same check still arrive as a single DM.
+  </p>
+
+  {{if not $w.Rules}}
+    <p class="small">No rules yet, so this node can never alert. Add one below.</p>
+  {{else}}
+  <div class="list">
+    {{range $w.Rules}}
+    <div class="rule">
+      <div>
+        <div class="rule-title">
+          {{ruleTitle .Rule}}
+          <span class="pill {{stateClass .State}}"><span class="dot"></span>{{stateLabel .State}}</span>
+        </div>
+        <div class="small">
+          No {{ruleDesc .Rule}} for {{.Rule.ThresholdHours}}h
+        </div>
+        {{if eq .State.State "unknown"}}
+        <div class="small note">
+          Nothing to judge yet — nothing matching this rule has ever been
+          recorded for this node, so it will stay quiet rather than guess.
+        </div>
+        {{end}}
+      </div>
+      <form method="post" action="/rules/{{.Rule.ID}}/delete" style="margin:0">
+        <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
+        <input type="hidden" name="watch_id" value="{{$w.Watch.ID}}">
+        <button class="secondary" type="submit">Remove</button>
+      </form>
+    </div>
+    {{end}}
+  </div>
+  {{end}}
+</div>
+
+{{/* -------------------------------------------------------- add a rule -- */}}
+<div class="card">
+  <h3>Add a rule</h3>
+  <form method="post" action="/watches/{{$w.Watch.ID}}/rules">
+    <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
+
+    <div class="row" style="margin-bottom:.8rem">
+      <label class="field">Tell me after
+        <input type="number" name="threshold_hours" min="1" max="720" value="6"
+               aria-label="Hours of silence before you are alerted">
+        hours of silence
+      </label>
+      <label class="field">counting
+        <select name="direction" aria-label="Which involvement counts">
+          <option value="either">sent or passed on</option>
+          <option value="carried">only traffic it passed on</option>
+          <option value="sent">only traffic it sent</option>
+        </select>
+      </label>
+      <label class="field">named
+        <input type="text" name="label" placeholder="optional" style="width:11rem"
+               aria-label="Optional name for this rule">
+      </label>
+    </div>
+
+    <fieldset class="types">
+      <legend class="small">Which traffic counts</legend>
+      {{range $.Groups}}
+      <div class="tgroup">
+        <div class="tgroup-head">
+          <button type="button" class="chip" data-group="{{.Name}}">{{.Name}}</button>
+          <span class="small">{{.Note}}</span>
+        </div>
+        <div class="tgroup-types" data-group-body="{{.Name}}">
+          {{range .Types}}
+          <label class="tcheck">
+            <input type="checkbox" name="types" value="{{.}}">
+            <span class="mono">{{typeName .}}</span>
+          </label>
+          {{end}}
+        </div>
+      </div>
+      {{end}}
+    </fieldset>
+
+    <div class="row" style="margin-top:.9rem">
+      <button type="submit">Add rule</button>
+    </div>
+  </form>
+
+  <details style="margin-top:1rem">
+    <summary class="small">Or use CoreScope's own summary instead</summary>
+    <p class="small" style="margin:.6rem 0">
+      These two ignore packet types entirely and use CoreScope's own figures.
+      They see more traffic than the per-type rules above can — including
+      routes too short to identify anyone — so they are the blunter but
+      broader option.
+    </p>
+    <form method="post" action="/watches/{{$w.Watch.ID}}/rules" class="row">
+      <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
+      <label class="field">
+        <select name="source" aria-label="Which CoreScope figure">
+          <option value="seen">not heard at all</option>
+          <option value="relayed">stopped passing traffic</option>
+        </select>
+      </label>
+      <label class="field">for
+        <input type="number" name="threshold_hours" min="1" max="720" value="24"
+               aria-label="Hours of silence before you are alerted">
+        hours
+      </label>
+      <button class="secondary" type="submit">Add</button>
+    </form>
+  </details>
+</div>
+
+{{/* --------------------------------------------------------- activity -- */}}
+<div class="card">
+  <h3>What we've seen</h3>
+  <p class="small" style="margin:.2rem 0 .9rem">
+    The last time each kind of traffic was observed for this node, and how many
+    packets support it.
+  </p>
+
+  <div style="overflow-x:auto">
+  <table>
+    <thead>
+      <tr><th>traffic</th><th>sent by it</th><th>passed on by it</th><th>packets</th></tr>
+    </thead>
+    <tbody>
+      {{range .Activity}}
+      <tr>
+        <td class="mono">{{.Name}}</td>
+        <td>
+          {{if not .SentKnowable}}<span class="dim" title="Only adverts name their sender">—</span>
+          {{else if .Sent.IsZero}}<span class="dim">never</span>
+          {{else}}<span class="pill {{freshClass .Sent $.Now}}"><span class="dot"></span>{{since .Sent $.Now}}</span>{{end}}
+        </td>
+        <td>
+          {{if .Carried.IsZero}}<span class="dim">never</span>
+          {{else}}<span class="pill {{freshClass .Carried $.Now}}"><span class="dot"></span>{{since .Carried $.Now}}</span>{{end}}
+        </td>
+        <td class="small">{{if gt (add .SentEvidence .CarriedEvidence) 0}}{{add .SentEvidence .CarriedEvidence}}{{else}}—{{end}}</td>
+      </tr>
+      {{end}}
+    </tbody>
+  </table>
+  </div>
+
+  <p class="small note" style="margin-top:.9rem">
+    <b>Why some cells say “—”.</b> Only adverts carry their sender's identity.
+    Every other kind of packet is encrypted and identifies its sender with a
+    single byte, which on this mesh narrows it to about three nodes — not one.
+    So we can tell you what a node <em>passed on</em>, and what it
+    <em>advertised</em>, but not what it sent.
+  </p>
+  <p class="small note">
+    <b>And why counts can look low.</b> A node is only identifiable in a route
+    when that route uses hashes of three bytes or more, which is roughly four
+    packets in ten. A rule with no packets behind it stays quiet instead of
+    treating missing evidence as silence.
+  </p>
+</div>
+
+{{/* ------------------------------------------------------------ admin -- */}}
+<div class="card">
+  <h3>This node</h3>
+  <div class="row">
+    <form method="post" action="/watches/{{$w.Watch.ID}}/update" class="row" style="margin:0">
+      <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
+      {{if $muted}}
+        <input type="hidden" name="mute_hours" value="0">
+        <button class="secondary" type="submit">Unmute</button>
+      {{else}}
+        <label class="field">Mute for
+          <input type="number" name="mute_hours" min="1" max="720" value="24"
+                 aria-label="Hours to mute alerts for">
+          hours
+        </label>
+        <button class="secondary" type="submit">Mute</button>
+      {{end}}
+    </form>
+    <form method="post" action="/watches/{{$w.Watch.ID}}/delete" style="margin:0">
+      <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
+      <button class="danger" type="submit">Stop watching</button>
+    </form>
+  </div>
+  <p class="small" style="margin:.7rem 0 0">
+    Muting keeps tracking this node — it just doesn't message you, which is
+    what you want while you're up a hill working on it.
+  </p>
+</div>
+
+<script>
+// Progressive enhancement only: the group buttons tick their own checkboxes.
+// Without JavaScript every box is still there to tick by hand, so the form
+// works either way.
+document.querySelectorAll('.chip[data-group]').forEach(function (btn) {
+  btn.addEventListener('click', function () {
+    var body = document.querySelector('[data-group-body="' + btn.dataset.group + '"]');
+    if (!body) return;
+    var boxes = body.querySelectorAll('input[type=checkbox]');
+    var turnOn = Array.prototype.some.call(boxes, function (b) { return !b.checked; });
+    boxes.forEach(function (b) { b.checked = turnOn; });
+    btn.classList.toggle('on', turnOn);
+  });
+});
+</script>
+{{end}}

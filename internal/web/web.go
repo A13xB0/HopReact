@@ -20,6 +20,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -69,9 +70,14 @@ func New(st *store.Store, dc *discord.Client, cfg config.Config, log *slog.Logge
 		"freshClass": freshClass,
 		"shortKey":   shortKey,
 		"canRelay":   canRelay,
+		"ruleTitle":  ruleTitle,
+		"ruleDesc":   ruleDescription,
+		"ruleHas":    ruleHasType,
+		"typeName":   corescope.TypeName,
+		"add":        func(a, b int) int { return a + b },
 	}
 	pages := map[string]*template.Template{}
-	for _, page := range []string{"index.html", "watches.html", "search.html"} {
+	for _, page := range []string{"index.html", "watches.html", "search.html", "watch.html"} {
 		t, err := template.New(page).Funcs(funcs).
 			ParseFS(templateFS, "templates/layout.html", "templates/"+page)
 		if err != nil {
@@ -106,8 +112,11 @@ func (s *Server) Routes() http.Handler {
 
 	mux.HandleFunc("GET /watches", s.handleWatches)
 	mux.HandleFunc("POST /watches", s.handleAddWatch)
+	mux.HandleFunc("GET /watches/{id}", s.handleWatchDetail)
 	mux.HandleFunc("POST /watches/{id}/delete", s.handleDeleteWatch)
 	mux.HandleFunc("POST /watches/{id}/update", s.handleUpdateWatch)
+	mux.HandleFunc("POST /watches/{id}/rules", s.handleAddRule)
+	mux.HandleFunc("POST /rules/{id}/delete", s.handleDeleteRule)
 	mux.HandleFunc("GET /search", s.handleSearch)
 	mux.HandleFunc("POST /account/test-dm", s.handleTestDM)
 	mux.HandleFunc("POST /account/delete", s.handleDeleteAccount)
@@ -228,10 +237,136 @@ type pageData struct {
 	FlashKind string
 
 	Watches    []store.WatchView
+	Watch      *store.WatchView
+	Activity   []activityRow
+	Groups     []typeGroup
 	Results    []store.Target
 	Query      string
 	FeedHealth feedHealth
 	Now        time.Time
+}
+
+// typeGroup is a one-click preset in the rule editor. Groups are expanded to
+// their member types when a rule is saved, never stored by name — otherwise
+// redefining a group later would silently change what existing rules alert
+// on, which is not a thing an alerting tool may do quietly.
+type typeGroup struct {
+	Name  string
+	Note  string
+	Types []int
+}
+
+var typeGroups = []typeGroup{
+	{"Adverts", "How a node announces itself. The most reliable heartbeat.",
+		[]int{corescope.TypeADVERT}},
+	{"Messages", "Direct and channel messages, and their multipart pieces.",
+		[]int{corescope.TypeTXTMsg, corescope.TypeGRPTXT, corescope.TypeGRPData, corescope.TypeMULTIPART}},
+	{"Requests & replies", "Status polls, logins and their responses.",
+		[]int{corescope.TypeREQ, corescope.TypeRESPONSE, corescope.TypeANONReq}},
+	{"Routing & housekeeping", "Acknowledgements, path discovery and traces.",
+		[]int{corescope.TypeACK, corescope.TypePATH, corescope.TypeTRACE, corescope.TypeCONTROL}},
+	{"Other", "Anything custom.", []int{corescope.TypeRAWCustom}},
+}
+
+func knownType(t int) bool {
+	for _, k := range corescope.AllTypes {
+		if k == t {
+			return true
+		}
+	}
+	return false
+}
+
+// activityRow is one payload type's line in the detail table.
+type activityRow struct {
+	Type int
+	Name string
+
+	Sent            time.Time
+	SentEvidence    int
+	Carried         time.Time
+	CarriedEvidence int
+
+	// SentKnowable is true only for adverts. Every other payload type is
+	// encrypted and identifies its sender with a single byte, so a blank in
+	// the "sent" column means "cannot be known", not "never happened" — and
+	// the table has to say which.
+	SentKnowable bool
+}
+
+func activityRows(acts []store.Activity) []activityRow {
+	byType := map[int]*activityRow{}
+	for _, t := range corescope.AllTypes {
+		byType[t] = &activityRow{
+			Type: t, Name: corescope.TypeName(t),
+			SentKnowable: t == corescope.TypeADVERT,
+		}
+	}
+	for _, a := range acts {
+		row := byType[a.PayloadType]
+		if row == nil {
+			row = &activityRow{Type: a.PayloadType, Name: corescope.TypeName(a.PayloadType)}
+			byType[a.PayloadType] = row
+		}
+		switch a.Direction {
+		case store.DirSent:
+			row.Sent, row.SentEvidence = a.LastAt, a.EvidenceCount
+		case store.DirCarried:
+			row.Carried, row.CarriedEvidence = a.LastAt, a.EvidenceCount
+		}
+	}
+	out := make([]activityRow, 0, len(byType))
+	for _, t := range corescope.AllTypes {
+		out = append(out, *byType[t])
+	}
+	// Types with something to show come first; the rest keep wire order so
+	// the table doesn't reshuffle between page loads.
+	sort.SliceStable(out, func(i, j int) bool {
+		return (out[i].SentEvidence+out[i].CarriedEvidence > 0) &&
+			(out[j].SentEvidence+out[j].CarriedEvidence == 0)
+	})
+	return out
+}
+
+// ruleDescription says in words what a rule watches for.
+func ruleDescription(r store.Rule) string {
+	switch r.Source {
+	case store.SourceSeen:
+		return "any packet at all, as reported by CoreScope"
+	case store.SourceRelayed:
+		return "any traffic passed on, as reported by CoreScope"
+	}
+	names := make([]string, 0, len(r.Types))
+	for _, t := range r.Types {
+		names = append(names, corescope.TypeName(t))
+	}
+	what := strings.Join(names, ", ")
+	switch r.Direction {
+	case store.DirSent:
+		return what + ", sent by it"
+	case store.DirCarried:
+		return what + ", passed on by it"
+	}
+	return what + ", sent or passed on"
+}
+
+// ruleTitle is the heading for a rule.
+func ruleTitle(r store.Rule) string {
+	if strings.TrimSpace(r.Label) != "" {
+		return r.Label
+	}
+	return ruleDescription(r)
+}
+
+// ruleHasType reports whether a rule already covers a type, so the editor can
+// pre-tick boxes.
+func ruleHasType(r store.Rule, t int) bool {
+	for _, v := range r.Types {
+		if v == t {
+			return true
+		}
+	}
+	return false
 }
 
 type feedHealth struct {
@@ -478,6 +613,8 @@ func (s *Server) handleDeleteWatch(w http.ResponseWriter, r *http.Request) {
 	redirectFlash(w, r, "/watches", "Removed.", "ok")
 }
 
+// handleUpdateWatch now only mutes: thresholds moved onto individual rules,
+// since a watch can hold several with different ones.
 func (s *Server) handleUpdateWatch(w http.ResponseWriter, r *http.Request) {
 	u, ok := userFrom(r.Context())
 	if !ok {
@@ -485,21 +622,142 @@ func (s *Server) handleUpdateWatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id, _ := strconv.ParseInt(r.PathValue("id"), 10, 64)
-	hours, _ := strconv.Atoi(r.PostFormValue("threshold_hours"))
-	if hours < config.MinThresholdHours {
-		hours = config.MinThresholdHours
-	}
 	var muted time.Time
 	if h, _ := strconv.Atoi(r.PostFormValue("mute_hours")); h > 0 {
 		muted = s.Store.Now().UTC().Add(time.Duration(h) * time.Hour)
 	}
-	if err := s.Store.UpdateWatch(r.Context(), u.ID, id, hours,
-		r.PostFormValue("alert_on_relay") == "on", muted); err != nil && !errors.Is(err, store.ErrNotFound) {
+	if err := s.Store.SetWatchMute(r.Context(), u.ID, id, muted); err != nil && !errors.Is(err, store.ErrNotFound) {
 		s.Log.Error("updating watch", "err", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-	redirectFlash(w, r, "/watches", "Saved.", "ok")
+	msg := "Alerts muted."
+	if muted.IsZero() {
+		msg = "Alerts unmuted."
+	}
+	redirectFlash(w, r, fmt.Sprintf("/watches/%d", id), msg, "ok")
+}
+
+// handleWatchDetail renders one watch: its rules, and what each payload type
+// was last seen doing.
+func (s *Server) handleWatchDetail(w http.ResponseWriter, r *http.Request) {
+	u, ok := userFrom(r.Context())
+	if !ok {
+		http.Redirect(w, r, "/", http.StatusSeeOther)
+		return
+	}
+	id, _ := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	view, err := s.Store.WatchViewByID(r.Context(), u.ID, id)
+	if errors.Is(err, store.ErrNotFound) {
+		http.NotFound(w, r)
+		return
+	}
+	if err != nil {
+		s.Log.Error("loading watch", "err", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	acts, err := s.Store.ActivityFor(r.Context(), view.Watch.TargetKind, view.Watch.TargetKey)
+	if err != nil {
+		s.Log.Error("loading activity", "err", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	d := s.page(r, "Watch settings")
+	d.Watch = &view
+	d.Activity = activityRows(acts)
+	d.Groups = typeGroups
+	d.FeedHealth = s.feedHealth(r)
+	d.Flash, d.FlashKind = flashFrom(r)
+	s.render(w, "watch.html", d)
+}
+
+func (s *Server) handleAddRule(w http.ResponseWriter, r *http.Request) {
+	u, ok := userFrom(r.Context())
+	if !ok {
+		http.Redirect(w, r, "/", http.StatusSeeOther)
+		return
+	}
+	id, _ := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	dest := fmt.Sprintf("/watches/%d", id)
+
+	hours, _ := strconv.Atoi(r.PostFormValue("threshold_hours"))
+	if hours < config.MinThresholdHours {
+		hours = config.MinThresholdHours
+	}
+
+	rule := store.Rule{WatchID: id, ThresholdHours: hours,
+		Label: strings.TrimSpace(r.PostFormValue("label"))}
+
+	switch r.PostFormValue("source") {
+	case "seen":
+		rule.Source, rule.Direction = store.SourceSeen, store.DirEither
+	case "relayed":
+		rule.Source, rule.Direction = store.SourceRelayed, store.DirCarried
+	default:
+		rule.Source = store.SourceTypes
+		switch d := r.PostFormValue("direction"); d {
+		case "sent", "carried":
+			rule.Direction = store.Direction(d)
+		default:
+			rule.Direction = store.DirEither
+		}
+		// Types arrive as repeated checkbox values. Unknown numbers are
+		// dropped rather than stored: a rule referring to a type that does
+		// not exist would silently never match.
+		if err := r.ParseForm(); err == nil {
+			seen := map[int]bool{}
+			for _, v := range r.PostForm["types"] {
+				n, err := strconv.Atoi(v)
+				if err != nil || seen[n] || !knownType(n) {
+					continue
+				}
+				seen[n] = true
+				rule.Types = append(rule.Types, n)
+			}
+		}
+		sort.Ints(rule.Types)
+		if len(rule.Types) == 0 {
+			redirectFlash(w, r, dest, "Pick at least one kind of traffic for that rule.", "error")
+			return
+		}
+	}
+
+	_, err := s.Store.AddRule(r.Context(), u.ID, rule)
+	switch {
+	case errors.Is(err, store.ErrNotFound):
+		http.NotFound(w, r)
+	case errors.Is(err, store.ErrRuleLimit):
+		redirectFlash(w, r, dest,
+			fmt.Sprintf("That's the limit of %d rules on one node.", store.MaxRulesPerWatch), "error")
+	case err != nil:
+		s.Log.Error("adding rule", "err", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+	default:
+		redirectFlash(w, r, dest, "Rule added.", "ok")
+	}
+}
+
+func (s *Server) handleDeleteRule(w http.ResponseWriter, r *http.Request) {
+	u, ok := userFrom(r.Context())
+	if !ok {
+		http.Redirect(w, r, "/", http.StatusSeeOther)
+		return
+	}
+	id, _ := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	dest := "/watches"
+	if v := strings.TrimSpace(r.PostFormValue("watch_id")); v != "" {
+		if wid, err := strconv.ParseInt(v, 10, 64); err == nil {
+			dest = fmt.Sprintf("/watches/%d", wid)
+		}
+	}
+	if err := s.Store.DeleteRule(r.Context(), u.ID, id); err != nil && !errors.Is(err, store.ErrNotFound) {
+		s.Log.Error("deleting rule", "err", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	redirectFlash(w, r, dest, "Rule removed.", "ok")
 }
 
 // handleTestDM lets someone confirm delivery works before they rely on it,

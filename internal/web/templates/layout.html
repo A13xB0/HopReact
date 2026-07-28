@@ -91,6 +91,33 @@ label{cursor:pointer}
 .relay-opt input{margin-top:.2rem;flex-shrink:0}
 .relay-opt b{color:var(--text);font-weight:600}
 
+/* ---------- rules ---------- */
+.rule{background:#0b1c30;border:1px solid var(--border);border-radius:10px;
+  padding:.7rem .85rem;display:grid;gap:.6rem;
+  grid-template-columns:minmax(0,1fr) auto;align-items:start}
+.rule-title{display:flex;align-items:center;gap:.5rem;flex-wrap:wrap;
+  font-weight:600;margin-bottom:.15rem}
+.note{border-left:2px solid var(--border);padding-left:.6rem;margin:.4rem 0 0}
+.dim{color:var(--dim)}
+
+/* ---------- type picker ---------- */
+fieldset.types{border:1px solid var(--border);border-radius:10px;
+  padding:.8rem .9rem;margin:0;display:flex;flex-direction:column;gap:.75rem}
+fieldset.types legend{padding:0 .4rem;color:var(--dim);font-size:.72rem;
+  text-transform:uppercase;letter-spacing:.05em}
+.tgroup-head{display:flex;align-items:baseline;gap:.55rem;flex-wrap:wrap;
+  margin-bottom:.35rem}
+.tgroup-types{display:flex;gap:.45rem;flex-wrap:wrap}
+.chip{background:transparent;border:1px solid var(--border);color:var(--text);
+  border-radius:999px;padding:.2rem .7rem;font-size:.76rem;font-weight:600}
+.chip:hover{border-color:var(--accent)}
+.chip.on{background:rgba(88,101,242,.2);border-color:var(--accent)}
+.tcheck{display:inline-flex;align-items:center;gap:.35rem;
+  border:1px solid var(--border);border-radius:8px;padding:.22rem .5rem;
+  font-size:.78rem;background:#08131f}
+.tcheck:hover{border-color:#2b5183}
+.tcheck input{margin:0}
+
 /* ---------- banners ---------- */
 .banner{border-left:3px solid var(--warn);padding:.75rem .95rem;border-radius:10px;
   background:rgba(250,204,21,.08);margin-bottom:1rem}
@@ -110,6 +137,7 @@ tr:last-child td{border-bottom:0}
   .node-actions{align-items:stretch}
   .node-actions form{width:100%}
   .relay-opt{max-width:none}
+  .rule{grid-template-columns:1fr}
   table,thead,tbody,tr,th,td{display:block}
   thead{display:none}
   tr{border:1px solid var(--border);border-radius:10px;margin-bottom:.7rem;padding:.6rem}

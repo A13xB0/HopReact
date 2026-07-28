@@ -38,25 +38,58 @@ in.
 
 ## How it decides something is offline
 
-CoreScope already tracks, per node, when it was last heard and when it last
-appeared as a hop in a packet route. HopReact reads both:
+You set **rules**, and each node can have as many as you like. A rule is just
+"tell me if there's been no *this* for *that* many hours". They work
+independently, so you might say *no adverts for 24 hours* **and** *no messages,
+responses or acks for 6*. If several trip at once you still get one message.
 
-- **Not heard** (default) — nothing at all from the node for your chosen
-  number of hours.
-- **Not relaying** (optional, per node) — the node is still alive but has
-  stopped forwarding traffic. Off by default, because plenty of nodes have
-  never relayed anything and it would be noise.
+You can be as broad or as narrow as you want:
 
-Observers are watched separately, on whether they are still reporting packets.
+- **Particular kinds of traffic** — adverts, channel messages, responses,
+  acknowledgements and the rest, individually or by group. This is how you say
+  "I don't care about requests": leave them unticked. A repeater that still
+  adverts happily while carrying nobody's messages is exactly the failure this
+  catches, and the blunter options below can't see it.
+- **Not heard at all** — nothing whatsoever from the node, using CoreScope's
+  own figure.
+- **Stopped passing traffic** — still alive, but no longer forwarding.
+
+New nodes start with adverts, responses and channel messages, plus a
+not-heard-at-all backstop. Observers are watched on whether they are still
+reporting packets.
+
+Every node also gets a table of what each kind of traffic was last seen doing,
+so you can look before you decide what to alert on.
+
+### What we can and can't tell you
+
+Worth being straight about, because the interface would otherwise imply more
+than it knows.
+
+Only **adverts** carry their sender's identity. Every other kind of packet is
+encrypted and identifies its sender with a single byte — which, across the ~780
+nodes on this mesh, narrows it to about three. So HopReact can tell you what a
+node **passed on**, and what it **advertised**, but never what it *sent*.
+
+A node is identifiable in a route only when that route uses hashes of three
+bytes or more. Three bytes is unique across every node on the mesh; one byte
+matches up to eight, so those hops are discarded rather than guessed at. That
+costs coverage — roughly four packets in ten carry usable evidence — and the
+trade is deliberate: a confident wrong attribution would mark a dead node alive
+and silently disarm the alert you were relying on.
+
+Because of that, **a rule with no evidence behind it stays quiet** rather than
+treating a gap in what we can see as proof your node is down.
 
 Alerts are deliberately quiet: one message when something goes down, one when
 it comes back, and nothing in between — no matter how long it stays down.
 
 ## Status
 
-Feature-complete and running: sign-in, watches, polling, the alert engine and
-Discord delivery are all in place and tested. It has not yet been deployed
-anywhere public.
+Running in production at
+[scotmesh-alerts.mm7roq.compute.oarc.uk](https://scotmesh-alerts.mm7roq.compute.oarc.uk).
+Sign-in, watches, per-type rules, polling, the alert engine and Discord
+delivery are all in place and tested.
 
 ## Quick start
 

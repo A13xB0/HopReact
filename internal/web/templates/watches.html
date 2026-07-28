@@ -40,38 +40,33 @@
 quiet before HopReact messages you.</p></div>
 {{else}}
 <div class="card">
+<div style="overflow-x:auto">
 <table>
-<thead><tr><th>Node</th><th>Status</th><th>Last seen</th><th>Threshold</th><th></th></tr></thead>
+<thead><tr><th>Node</th><th>Status</th><th>Last seen</th><th>Rules</th><th></th></tr></thead>
 <tbody>
 {{range .Watches}}
+{{$worst := .Worst}}
 <tr>
   <td>
-    <strong>{{if .Target}}{{.Target.Name}}{{else}}{{.Watch.TargetKey}}{{end}}</strong><br>
+    <strong><a href="/watches/{{.Watch.ID}}">{{if and .Target .Target.Name}}{{.Target.Name}}{{else}}{{shortKey .Watch.TargetKey}}{{end}}</a></strong><br>
     <span class="small">{{.Watch.TargetKind}}{{if .Target}}{{if .Target.Role}} · {{.Target.Role}}{{end}}{{end}}</span>
   </td>
   <td>
-    <span class="pill {{stateClass .Seen}}">{{stateLabel .Seen}}</span>
-    {{if .Relay}}<br><span class="pill {{stateClass .Relay}}" style="margin-top:.25rem">relay: {{stateLabel .Relay}}</span>{{end}}
+    {{if $worst}}
+      <span class="pill {{stateClass $worst.State}}"><span class="dot"></span>{{stateLabel $worst.State}}</span><br>
+      <span class="small">{{ruleTitle $worst.Rule}}</span>
+    {{else}}
+      <span class="pill muted"><span class="dot"></span>No rules</span>
+    {{end}}
     {{if .Watch.MutedUntil.IsZero}}{{else}}<br><span class="small">muted until {{stamp .Watch.MutedUntil}}</span>{{end}}
   </td>
   <td>
     {{if .Target}}{{since .Target.LastSeen $.Now}}<br><span class="small">{{stamp .Target.LastSeen}}</span>
-    {{if .Watch.AlertOnRelay}}<br><span class="small">relayed {{since .Target.LastRelayed $.Now}}</span>{{end}}
     {{else}}<span class="small">CoreScope has never reported this key</span>{{end}}
   </td>
-  <td>
-    <form method="post" action="/watches/{{.Watch.ID}}/update" class="row" style="margin:0">
-      <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
-      <input type="number" name="threshold_hours" min="1" max="720" value="{{.Watch.ThresholdHours}}" style="width:5rem"> h
-      <label class="small" title="A repeater can still be heard while no longer forwarding anyone else's packets."><input type="checkbox" name="alert_on_relay" {{if .Watch.AlertOnRelay}}checked{{end}}> also if it stops passing traffic</label>
-      <select name="mute_hours" class="small">
-        <option value="0">don't mute</option>
-        <option value="4">mute 4h</option>
-        <option value="24">mute 24h</option>
-        <option value="168">mute 7d</option>
-      </select>
-      <button class="secondary" type="submit">Save</button>
-    </form>
+  <td class="small">
+    {{range .Rules}}{{ruleTitle .Rule}} · {{.Rule.ThresholdHours}}h<br>{{end}}
+    <a href="/watches/{{.Watch.ID}}">Change…</a>
   </td>
   <td>
     <form method="post" action="/watches/{{.Watch.ID}}/delete" style="margin:0">
@@ -83,6 +78,7 @@ quiet before HopReact messages you.</p></div>
 {{end}}
 </tbody>
 </table>
+</div>
 </div>
 {{end}}
 
