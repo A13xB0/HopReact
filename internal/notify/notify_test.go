@@ -56,11 +56,14 @@ func harness(t *testing.T) (*store.Store, *recorder, *Notifier, *time.Time) {
 	return st, rec, n, &now
 }
 
-func queue(t *testing.T, st *store.Store, userID int64, kind, name, signal string) {
+func queue(t *testing.T, st *store.Store, userID int64, kind, name, ruleLabel string) {
 	t.Helper()
 	payload, _ := json.Marshal(poller.AlertPayload{
 		Kind: kind, TargetKind: "node", TargetKey: "aa", TargetName: name,
-		Signal: signal, ThresholdHours: 6, LastSeenUnix: t0.Add(-8 * time.Hour).Unix(),
+		Rules: []poller.RuleTrip{{
+			Label: ruleLabel, ThresholdHours: 6,
+			LastSeenUnix: t0.Add(-8 * time.Hour).Unix(),
+		}},
 	})
 	if err := st.WriteTx(context.Background(), func(tx *sql.Tx) error {
 		return st.QueueNotification(context.Background(), tx, userID, kind, string(payload), time.Time{})
@@ -245,18 +248,58 @@ func TestRendersDownAndRecoveredSeparately(t *testing.T) {
 	}
 }
 
-// The relay signal has to read differently from the plain one, or the
-// message is misleading — the node might be perfectly reachable.
+// A relay alert has to read differently from a plain one, or the message is
+// misleading — the node might be perfectly reachable and simply not passing
+// anything on. Each rule names itself in the message, which is what carries
+// that distinction now that a watch can hold several.
 func TestRelaySignalReadsDifferently(t *testing.T) {
 	st, rec, n, _ := harness(t)
 	ctx := context.Background()
 	u, _ := st.UpsertUser(ctx, "d1", "alice", "")
-	queue(t, st, u.ID, "alert", "relay-node", "relayed")
+	queue(t, st, u.ID, "alert", "relay-node", "Stopped passing traffic")
 
 	if _, err := n.DrainOnce(ctx, 10); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(rec.sent[0].content, "not relaying") {
+	if !strings.Contains(rec.sent[0].content, "Stopped passing traffic") {
 		t.Errorf("expected the relay wording, got %q", rec.sent[0].content)
+	}
+}
+
+// A watch whose rules all trip in the same poll must arrive as ONE bullet
+// listing its reasons. Setting up careful rules should sharpen the alerting,
+// not multiply the pings.
+func TestSeveralRulesOnOneWatchReadAsOneEntry(t *testing.T) {
+	st, rec, n, _ := harness(t)
+	ctx := context.Background()
+	u, _ := st.UpsertUser(ctx, "d1", "alice", "")
+
+	payload, _ := json.Marshal(poller.AlertPayload{
+		Kind: "alert", TargetKind: "node", TargetKey: "aa", TargetName: "Ben Nevis",
+		Rules: []poller.RuleTrip{
+			{Label: "Adverts", ThresholdHours: 6, LastSeenUnix: t0.Add(-8 * time.Hour).Unix()},
+			{Label: "Channel messages", ThresholdHours: 12, LastSeenUnix: t0.Add(-20 * time.Hour).Unix()},
+		},
+	})
+	if err := st.WriteTx(ctx, func(tx *sql.Tx) error {
+		return st.QueueNotification(ctx, tx, u.ID, "alert", string(payload), time.Time{})
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := n.DrainOnce(ctx, 10); err != nil {
+		t.Fatal(err)
+	}
+	got := rec.sent[0].content
+	if strings.Count(got, "Ben Nevis") != 1 {
+		t.Errorf("the node should be named once, not once per rule: %q", got)
+	}
+	for _, want := range []string{"Adverts", "Channel messages"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("message should give the reason %q, got %q", want, got)
+		}
+	}
+	if !strings.Contains(got, "One of your nodes") {
+		t.Errorf("two rules on one node is still one node: %q", got)
 	}
 }

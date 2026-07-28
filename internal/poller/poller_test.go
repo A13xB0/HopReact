@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -22,13 +23,28 @@ var t0 = time.Date(2026, 7, 28, 12, 0, 0, 0, time.UTC)
 type fakeScope struct {
 	nodes  []map[string]any
 	status int
-	srv    *httptest.Server
+	// packets is the /api/packets page. Separate status so a test can break
+	// just the packet feed while the node feed stays healthy.
+	packets      []map[string]any
+	packetStatus int
+	packetHits   int
+	srv          *httptest.Server
 }
 
 func newFakeScope(t *testing.T) *fakeScope {
 	t.Helper()
-	f := &fakeScope{status: http.StatusOK}
+	f := &fakeScope{status: http.StatusOK, packetStatus: http.StatusOK}
 	mux := http.NewServeMux()
+	mux.HandleFunc("/api/packets", func(w http.ResponseWriter, r *http.Request) {
+		f.packetHits++
+		if f.packetStatus != http.StatusOK {
+			http.Error(w, "no packets for you", f.packetStatus)
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]any{
+			"packets": f.packets, "total": len(f.packets),
+		})
+	})
 	mux.HandleFunc("/api/nodes", func(w http.ResponseWriter, r *http.Request) {
 		if f.status != http.StatusOK {
 			http.Error(w, "upstream sad", f.status)
@@ -53,7 +69,7 @@ func (f *fakeScope) setNodes(now time.Time, n int, age time.Duration) {
 	f.nodes = nil
 	for i := 0; i < n; i++ {
 		f.nodes = append(f.nodes, map[string]any{
-			"public_key":   fmt.Sprintf("%064x", i),
+			"public_key":   key(i),
 			"name":         fmt.Sprintf("node-%d", i),
 			"role":         "repeater",
 			"last_seen":    now.Add(-age).Format(time.RFC3339),
@@ -126,7 +142,13 @@ func (h *harness) watch(t *testing.T, key string, hours int) int64 {
 	return id
 }
 
-func key(i int) string { return fmt.Sprintf("%064x", i) }
+// key builds a distinct 64-hex public key for node i.
+//
+// The index goes at the FRONT deliberately. Padding it at the end — the
+// obvious %064x — gives every node the same leading three bytes, so the
+// attributor correctly refuses to resolve any of them and no per-type
+// evidence is ever recorded. Real public keys differ from the first byte.
+func key(i int) string { return fmt.Sprintf("%06x%058x", i, i) }
 
 // The happy path end to end: a healthy feed, a node goes quiet, exactly one
 // notification is queued, and it comes back with exactly one more.
@@ -370,5 +392,192 @@ func TestPollWithNoWatchesStillRecordsTargets(t *testing.T) {
 	runs, _ := h.st.RecentPollRuns(context.Background(), 1)
 	if runs[0].Status != store.PollOK {
 		t.Errorf("status = %q, want ok", runs[0].Status)
+	}
+}
+
+// ------------------------------------------------- per-type evidence ----
+
+// advertPacket is an advert from key(i), which names its sender outright.
+func advertPacket(id int64, i int, at time.Time) map[string]any {
+	dj, _ := json.Marshal(map[string]any{"pubKey": key(i)})
+	return map[string]any{
+		"id": id, "first_seen": at.Format(time.RFC3339),
+		"payload_type": corescope.TypeADVERT, "decoded_json": string(dj),
+	}
+}
+
+// carriedPacket is traffic of the given type routed through key(i), which is
+// identifiable only because the hop is three bytes wide.
+func carriedPacket(id int64, typ, i int, at time.Time) map[string]any {
+	return map[string]any{
+		"id": id, "first_seen": at.Format(time.RFC3339),
+		"payload_type": typ,
+		"_parsedPath":  []string{strings.ToUpper(key(i)[:6])},
+	}
+}
+
+// addRule attaches a per-type rule to a watch, which is how a user narrows
+// what counts as their node being alive.
+func (h *harness) addRule(t *testing.T, watchID int64, types []int, dir store.Direction, hours int) int64 {
+	t.Helper()
+	id, err := h.st.AddRule(context.Background(), 1, store.Rule{
+		WatchID: watchID, Label: "test rule", Source: store.SourceTypes,
+		Types: types, Direction: dir, ThresholdHours: hours,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return id
+}
+
+// The feature working: a node still being heard, but no longer carrying the
+// kind of traffic the user cares about, alerts on that alone.
+func TestPerTypeRuleAlertsWhenItsTrafficStops(t *testing.T) {
+	h := newHarness(t, nil)
+	h.scope.setNodes(h.now, 200, time.Minute) // everything heard a minute ago
+	h.scope.packets = []map[string]any{
+		carriedPacket(1, corescope.TypeGRPTXT, 0, h.now.Add(-time.Minute)),
+	}
+	id := h.watch(t, key(0), 6)
+	h.addRule(t, id, []int{corescope.TypeGRPTXT}, store.DirCarried, 6)
+	h.poll(t)
+	if n := h.queued(t); len(n) != 0 {
+		t.Fatalf("queued %d on a healthy node, want 0", len(n))
+	}
+
+	// Time passes. The node is still heard — the node feed keeps saying so —
+	// but no more channel messages come through it.
+	h.now = t0.Add(9 * time.Hour)
+	h.scope.setNodes(h.now, 200, time.Minute)
+	h.scope.packets = nil
+	h.poll(t)
+
+	got := h.queued(t)
+	if len(got) != 1 {
+		t.Fatalf("queued %d, want exactly 1 — the node is heard but not carrying", len(got))
+	}
+	if !strings.Contains(got[0].Payload, "test rule") {
+		t.Errorf("the message should name the rule that tripped: %s", got[0].Payload)
+	}
+}
+
+// THE guard. Our evidence only covers adverts and path hops at least three
+// bytes wide — about 41% of packets — so a node can be perfectly healthy and
+// still produce nothing we can attribute.
+//
+// A rule with no evidence must stay UNKNOWN. Asserting only that it sends
+// nothing is too weak a test to be worth writing: the adopt-quiet rule
+// already silences a first transition into alerting, so a broken
+// implementation passes that check while telling the user on the dashboard
+// that their node has been down all along. Claiming an outage we cannot see
+// is the failure this guards against, so that is what is asserted.
+func TestRuleWithNoEvidenceStaysUnknownAndSilent(t *testing.T) {
+	h := newHarness(t, nil)
+	id := h.watch(t, key(0), 6)
+	// TRACE is real but vanishingly rare — one packet in three thousand on
+	// the live mesh. Nothing will ever be recorded for it here.
+	ruleID := h.addRule(t, id, []int{corescope.TypeTRACE}, store.DirCarried, 1)
+
+	for i := 0; i < 6; i++ {
+		h.now = t0.Add(time.Duration(i) * 12 * time.Hour)
+		h.scope.setNodes(h.now, 200, time.Minute)
+		// Plenty of other traffic, none of it TRACE.
+		h.scope.packets = []map[string]any{
+			carriedPacket(int64(100+i), corescope.TypeGRPTXT, 0, h.now.Add(-time.Minute)),
+		}
+		h.poll(t)
+	}
+
+	states, err := h.st.AllWatchState(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := states[id][ruleID].State; got != store.StateUnknown {
+		t.Errorf("state = %q, want %q — with no evidence we cannot claim it is down",
+			got, store.StateUnknown)
+	}
+	for _, n := range h.queued(t) {
+		if strings.Contains(n.Payload, "test rule") {
+			t.Fatalf("a rule with no evidence must never alert, got %s", n.Payload)
+		}
+	}
+}
+
+// Adverts need no path hashes at all, so they are the one signal that cannot
+// be starved by hop width. That is why the default rule set is built on them.
+func TestAdvertsAttributeWithoutAnyPath(t *testing.T) {
+	h := newHarness(t, nil)
+	h.scope.setNodes(h.now, 200, time.Minute)
+	h.scope.packets = []map[string]any{advertPacket(1, 0, h.now.Add(-2*time.Minute))}
+	h.watch(t, key(0), 6)
+	h.poll(t)
+
+	acts, err := h.st.ActivityFor(context.Background(), "node", key(0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found bool
+	for _, a := range acts {
+		if a.PayloadType == corescope.TypeADVERT && a.Direction == store.DirSent {
+			found = true
+			if a.EvidenceCount != 1 {
+				t.Errorf("evidence count = %d, want 1", a.EvidenceCount)
+			}
+		}
+	}
+	if !found {
+		t.Error("an advert should record its sender, with no path involved")
+	}
+}
+
+// The packet feed is a sliding window that overlaps heavily between polls.
+// Without the cursor, evidence_count would measure how often we polled rather
+// than how much traffic there was.
+func TestReplayedPacketsAreNotCountedTwice(t *testing.T) {
+	h := newHarness(t, nil)
+	h.scope.setNodes(h.now, 200, time.Minute)
+	h.scope.packets = []map[string]any{
+		advertPacket(1, 0, h.now.Add(-time.Minute)),
+		advertPacket(2, 0, h.now.Add(-2*time.Minute)),
+	}
+	h.watch(t, key(0), 6)
+	h.poll(t)
+
+	// The same page again, as the real feed would serve it.
+	h.now = t0.Add(5 * time.Minute)
+	h.scope.setNodes(h.now, 200, time.Minute)
+	h.poll(t)
+
+	acts, _ := h.st.ActivityFor(context.Background(), "node", key(0))
+	for _, a := range acts {
+		if a.Direction == store.DirSent && a.EvidenceCount != 2 {
+			t.Errorf("evidence count = %d after re-reading the same page, want 2", a.EvidenceCount)
+		}
+	}
+}
+
+// Losing the packet feed must not fail the poll. The seen and relayed signals
+// are still perfectly good, and per-type rules should degrade to "no fresh
+// evidence" rather than to "everything is offline".
+func TestPacketFeedFailureDoesNotFailThePoll(t *testing.T) {
+	h := newHarness(t, nil)
+	h.scope.setNodes(h.now, 200, time.Minute)
+	h.scope.packetStatus = http.StatusInternalServerError
+	h.watch(t, key(0), 6)
+
+	h.poll(t) // must not error
+
+	runs, err := h.st.RecentPollRuns(context.Background(), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(runs) != 1 || runs[0].Status != store.PollOK {
+		t.Fatalf("poll status = %+v, want ok despite the packet feed being down", runs)
+	}
+	if !runs[0].Evaluated {
+		t.Error("the poll should still have evaluated its watches")
+	}
+	if h.scope.packetHits == 0 {
+		t.Error("the packet feed should have been attempted")
 	}
 }

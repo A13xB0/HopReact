@@ -113,6 +113,12 @@ type PollConfig struct {
 	// don't evaluate. A mesh going completely silent looks identical from
 	// here, and being wrong in that direction is much cheaper.
 	MaxPollsWithoutAdvance int `yaml:"max_polls_without_advance"`
+
+	// PacketLimit is how many packets each poll reads for per-type evidence.
+	// The mesh runs about five packets a minute, so the default covers a
+	// couple of hours — enough overlap that a few missed polls lose nothing,
+	// and one request regardless of how many nodes are being watched.
+	PacketLimit int `yaml:"packet_limit"`
 }
 
 type AlertsConfig struct {
@@ -151,6 +157,7 @@ func Default() Config {
 			MinNodes:               100,
 			MinNodeFraction:        0.5,
 			MaxPollsWithoutAdvance: 2,
+			PacketLimit:            600,
 		},
 		Alerts: AlertsConfig{
 			ConfirmPolls:        2,
@@ -248,6 +255,9 @@ func (c Config) Validate() error {
 	}
 	if c.Poll.MaxPollsWithoutAdvance < 1 {
 		return fmt.Errorf("poll.max_polls_without_advance must be at least 1, got %d", c.Poll.MaxPollsWithoutAdvance)
+	}
+	if c.Poll.PacketLimit < 0 || c.Poll.PacketLimit > 10000 {
+		return fmt.Errorf("poll.packet_limit must be between 0 and 10000, got %d", c.Poll.PacketLimit)
 	}
 	if c.Alerts.ConfirmPolls < 1 {
 		return fmt.Errorf("alerts.confirm_polls must be at least 1, got %d", c.Alerts.ConfirmPolls)

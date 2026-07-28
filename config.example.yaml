@@ -72,6 +72,13 @@ poll:
   # that direction is far cheaper than alerting everyone.
   max_polls_without_advance: 2
 
+  # How many packets each poll reads to work out which nodes are carrying
+  # which kinds of traffic. One request, regardless of how many nodes are
+  # being watched. The mesh runs about five packets a minute, so 600 covers
+  # roughly two hours — enough overlap that a few missed polls lose nothing.
+  # A high-water mark stops a re-read page being counted twice.
+  packet_limit: 600
+
 alerts:
   # A watch must stay over its threshold for this many consecutive polls
   # before it alerts. Stops a node hovering right on the boundary from

@@ -189,28 +189,42 @@ func (n *Notifier) render(group []store.Notification) string {
 	return b.String()
 }
 
+// line renders one watch. A watch whose rules all tripped in the same poll
+// gets one bullet with its reasons nested underneath, rather than one bullet
+// per rule — otherwise setting up careful rules would be punished with more
+// noise instead of better information.
 func line(p poller.AlertPayload) string {
 	name := p.TargetName
 	if strings.TrimSpace(name) == "" {
 		name = shortKey(p.TargetKey)
 	}
-	what := "not heard"
-	if p.Signal == string(store.SignalRelayed) {
-		what = "not relaying"
-	}
 	kind := "repeater"
-	if p.TargetKind == string("observer") {
+	if p.TargetKind == "observer" {
 		kind = "observer"
 	}
 	if p.Kind == "recovered" {
+		if len(p.Rules) == 1 {
+			return fmt.Sprintf("• **%s** (%s) — %s: seen again\n", name, kind, p.Rules[0].Label)
+		}
 		return fmt.Sprintf("• **%s** (%s) — seen again\n", name, kind)
 	}
-	if p.LastSeenUnix == 0 {
-		return fmt.Sprintf("• **%s** (%s) — %s, threshold %dh\n", name, kind, what, p.ThresholdHours)
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "• **%s** (%s)\n", name, kind)
+	for _, r := range p.Rules {
+		label := r.Label
+		if strings.TrimSpace(label) == "" {
+			label = "no activity"
+		}
+		if r.LastSeenUnix == 0 {
+			fmt.Fprintf(&b, "    ◦ %s — nothing seen, threshold %dh\n", label, r.ThresholdHours)
+			continue
+		}
+		last := time.Unix(r.LastSeenUnix, 0).UTC()
+		fmt.Fprintf(&b, "    ◦ %s — last %s (threshold %dh)\n",
+			label, last.Format("2006-01-02 15:04 UTC"), r.ThresholdHours)
 	}
-	last := time.Unix(p.LastSeenUnix, 0).UTC()
-	return fmt.Sprintf("• **%s** (%s) — %s since %s (threshold %dh)\n",
-		name, kind, what, last.Format("2006-01-02 15:04 UTC"), p.ThresholdHours)
+	return b.String()
 }
 
 func shortKey(k string) string {

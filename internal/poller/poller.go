@@ -22,9 +22,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"hopreact/internal/alert"
+	"hopreact/internal/attribute"
 	"hopreact/internal/config"
 	"hopreact/internal/corescope"
 	"hopreact/internal/store"
@@ -42,17 +44,27 @@ type Poller struct {
 	OnBreaker func(ctx context.Context, reason string)
 }
 
+// RuleTrip is one rule's contribution to a message.
+type RuleTrip struct {
+	Label          string `json:"label"`
+	ThresholdHours int    `json:"threshold_hours"`
+	LastSeenUnix   int64  `json:"last_seen_unix"`
+}
+
 // AlertPayload is the JSON body of a queued notification. Kept structured
 // rather than pre-rendered so the message wording can change without a
 // migration, and so the drainer can batch several into one DM.
+//
+// One payload covers one watch and one direction of change. A watch with
+// three rules that all trip in the same poll produces a single payload
+// listing three rules, not three payloads — otherwise adding rules would make
+// the tool noisier, which is the opposite of what they are for.
 type AlertPayload struct {
-	Kind           string `json:"kind"`
-	TargetKind     string `json:"target_kind"`
-	TargetKey      string `json:"target_key"`
-	TargetName     string `json:"target_name"`
-	Signal         string `json:"signal"`
-	ThresholdHours int    `json:"threshold_hours"`
-	LastSeenUnix   int64  `json:"last_seen_unix"`
+	Kind       string     `json:"kind"`
+	TargetKind string     `json:"target_kind"`
+	TargetKey  string     `json:"target_key"`
+	TargetName string     `json:"target_name"`
+	Rules      []RuleTrip `json:"rules"`
 }
 
 // Run polls on every tick until ctx is cancelled.
@@ -104,6 +116,18 @@ func (p *Poller) PollOnce(ctx context.Context) error {
 	}
 	run.AdvancedCount = advanced
 
+	// Per-type evidence. Best-effort on purpose: if the packet feed is
+	// unavailable, the seen and relayed signals are still perfectly good, and
+	// per-type rules should degrade to "no fresh evidence" — which the
+	// evaluator treats as unknown — rather than to "everything is offline".
+	if fetchErr == nil {
+		if n, err := p.ingest(ctx, snap); err != nil {
+			p.Log.Warn("per-type evidence not updated this poll", "run", runID, "err", err)
+		} else if n > 0 {
+			p.Log.Debug("ingested packets", "run", runID, "packets", n)
+		}
+	}
+
 	maxRecent, err := p.Store.MaxRecentNodeCount(ctx, now.Add(-7*24*time.Hour))
 	if err != nil {
 		return fmt.Errorf("poller: reading recent node counts: %w", err)
@@ -153,6 +177,86 @@ func (p *Poller) PollOnce(ctx context.Context) error {
 	return p.Store.FinishPollRun(ctx, run)
 }
 
+// ingest reads the packet feed and records which nodes it proves were
+// carrying which kinds of traffic.
+//
+// The cursor matters more than it looks. The feed is a sliding window that
+// overlaps heavily between polls — at five packets a minute, a 600-packet
+// page covers about two hours — so without a high-water mark every poll would
+// re-count the same packets and evidence_count would become a measure of how
+// often we polled rather than of how much was actually seen.
+func (p *Poller) ingest(ctx context.Context, snap corescope.Snapshot) (int, error) {
+	cursor, err := p.Store.FeedCursor(ctx)
+	if err != nil {
+		return 0, err
+	}
+
+	fetchCtx, cancel := context.WithTimeout(ctx, p.Cfg.RequestTimeout())
+	defer cancel()
+	packets, err := p.Scope.FetchPackets(fetchCtx, p.Cfg.Poll.PacketLimit)
+	if err != nil {
+		return 0, err
+	}
+
+	idx := attribute.BuildIndex(snap.Nodes)
+
+	// Fold the page into one row per (node, type, direction) before touching
+	// the database: a busy repeater appears in hundreds of these.
+	type slot struct {
+		kind string
+		key  string
+		typ  int
+		dir  attribute.Direction
+	}
+	type agg struct {
+		at time.Time
+		n  int
+	}
+	rows := map[slot]*agg{}
+
+	var highest int64
+	fresh := 0
+	for _, pk := range packets {
+		if pk.ID > highest {
+			highest = pk.ID
+		}
+		if pk.ID <= cursor || pk.At.IsZero() {
+			continue
+		}
+		fresh++
+		for _, h := range attribute.Attribute(pk, idx) {
+			s := slot{kind: string(corescope.KindNode), key: h.Key, typ: h.Type, dir: h.Direction}
+			a := rows[s]
+			if a == nil {
+				a = &agg{}
+				rows[s] = a
+			}
+			a.n++
+			if pk.At.After(a.at) {
+				a.at = pk.At
+			}
+		}
+	}
+
+	if len(rows) == 0 && highest <= cursor {
+		return 0, nil
+	}
+
+	err = p.Store.WriteTx(ctx, func(tx *sql.Tx) error {
+		for s, a := range rows {
+			if err := p.Store.UpsertActivity(ctx, tx, s.kind, s.key, s.typ,
+				store.Direction(s.dir), a.at, a.n); err != nil {
+				return err
+			}
+		}
+		// Advancing the cursor in the same transaction as the evidence is
+		// what makes a crash safe: either both land or neither does, so a
+		// packet is never marked consumed without its evidence.
+		return p.Store.SetFeedCursor(ctx, tx, highest)
+	})
+	return fresh, err
+}
+
 type evalResult struct {
 	committed     bool
 	notified      int
@@ -180,6 +284,14 @@ func (p *Poller) evaluate(ctx context.Context, now time.Time, snap corescope.Sna
 	if err != nil {
 		return res, err
 	}
+	rules, err := p.Store.AllRules(ctx)
+	if err != nil {
+		return res, err
+	}
+	activity, err := p.Store.AllActivity(ctx)
+	if err != nil {
+		return res, err
+	}
 
 	// Index the snapshot for lookup.
 	byKey := map[string]corescope.Observation{}
@@ -191,46 +303,34 @@ func (p *Poller) evaluate(ctx context.Context, now time.Time, snap corescope.Sna
 
 	type pending struct {
 		watch store.Watch
+		rule  store.Rule
 		out   alert.Outcome
 	}
 	var planned []pending
 	entering, activeSignals := 0, 0
+	watchUser := map[int64]int64{}
 
 	for _, w := range watches {
+		watchUser[w.ID] = w.UserID
 		obs, known := byKey[w.TargetKind+"|"+w.TargetKey]
 		muted := !w.MutedUntil.IsZero() && now.Before(w.MutedUntil)
+		acts := activity[w.TargetKind+"|"+w.TargetKey]
 
-		signals := []struct {
-			sig store.Signal
-			ob  alert.Observation
-		}{
-			{store.SignalSeen, alert.Observation{At: obs.LastSeen, Applicable: known}},
-		}
-		if w.AlertOnRelay {
-			// Only meaningful once the target has been observed relaying at
-			// least once — a node that has never relayed has not stopped.
-			applicable := known && !obs.LastRelayed.IsZero()
-			signals = append(signals, struct {
-				sig store.Signal
-				ob  alert.Observation
-			}{store.SignalRelayed, alert.Observation{At: obs.LastRelayed, Applicable: applicable}})
-		}
-
-		for _, s := range signals {
+		for _, r := range rules[w.ID] {
 			activeSignals++
-			cur, ok := states[w.ID][s.sig]
+			cur, ok := states[w.ID][r.ID]
 			if !ok {
-				cur = store.WatchState{WatchID: w.ID, Signal: s.sig, State: store.StateUnknown, Since: now}
+				cur = store.WatchState{WatchID: w.ID, RuleID: r.ID, State: store.StateUnknown, Since: now}
 			}
-			cur.WatchID, cur.Signal = w.ID, s.sig
+			cur.WatchID, cur.RuleID = w.ID, r.ID
 
-			out := alert.Evaluate(now, s.ob, cur,
-				time.Duration(w.ThresholdHours)*time.Hour, muted, pol)
-			out.State.WatchID, out.State.Signal = w.ID, s.sig
+			out := alert.Evaluate(now, ruleObservation(r, obs, known, acts), cur,
+				time.Duration(r.ThresholdHours)*time.Hour, muted, pol)
+			out.State.WatchID, out.State.RuleID = w.ID, r.ID
 			if out.Entering {
 				entering++
 			}
-			planned = append(planned, pending{watch: w, out: out})
+			planned = append(planned, pending{watch: w, rule: r, out: out})
 		}
 	}
 
@@ -253,6 +353,17 @@ func (p *Poller) evaluate(ctx context.Context, now time.Time, snap corescope.Sna
 		return res, nil
 	}
 
+	// Messages are grouped by watch and by direction of change, so a watch
+	// whose three rules all trip in one poll produces one message listing
+	// three reasons. Adding rules should sharpen the alerting, not multiply
+	// the pings.
+	type msgKey struct {
+		watchID int64
+		kind    string
+	}
+	var msgOrder []msgKey
+	msgs := map[msgKey]*AlertPayload{}
+
 	err = p.Store.WriteTx(ctx, func(tx *sql.Tx) error {
 		for _, pl := range planned {
 			if !pl.out.Changed {
@@ -261,29 +372,47 @@ func (p *Poller) evaluate(ctx context.Context, now time.Time, snap corescope.Sna
 			if err := p.Store.SaveWatchState(ctx, tx, pl.out.State); err != nil {
 				return err
 			}
-			cur := states[pl.watch.ID][pl.out.State.Signal]
-			if err := p.Store.RecordAlertEvent(ctx, tx, pl.watch.ID, pl.out.State.Signal,
-				cur.State, pl.out.State.State, runID, pl.out.Notify); err != nil {
+			cur := states[pl.watch.ID][pl.rule.ID]
+			if err := p.Store.RecordAlertEvent(ctx, tx, pl.watch.ID, pl.rule.ID,
+				ruleLabel(pl.rule), cur.State, pl.out.State.State, runID, pl.out.Notify); err != nil {
 				return err
 			}
 			if !pl.out.Notify {
 				continue
 			}
-			obs := byKey[pl.watch.TargetKind+"|"+pl.watch.TargetKey]
-			payload, err := json.Marshal(AlertPayload{
-				Kind:           pl.out.Kind,
-				TargetKind:     pl.watch.TargetKind,
-				TargetKey:      pl.watch.TargetKey,
-				TargetName:     obs.Name,
-				Signal:         string(pl.out.State.Signal),
-				ThresholdHours: pl.watch.ThresholdHours,
+			k := msgKey{watchID: pl.watch.ID, kind: pl.out.Kind}
+			m := msgs[k]
+			if m == nil {
+				obs := byKey[pl.watch.TargetKind+"|"+pl.watch.TargetKey]
+				name := obs.Name
+				if name == "" {
+					name = pl.watch.Label
+				}
+				m = &AlertPayload{
+					Kind:       pl.out.Kind,
+					TargetKind: pl.watch.TargetKind,
+					TargetKey:  pl.watch.TargetKey,
+					TargetName: name,
+				}
+				msgs[k] = m
+				msgOrder = append(msgOrder, k)
+			}
+			m.Rules = append(m.Rules, RuleTrip{
+				Label:          ruleLabel(pl.rule),
+				ThresholdHours: pl.rule.ThresholdHours,
 				LastSeenUnix:   unixOrZero(pl.out.State.ObservedAt),
 			})
+		}
+
+		for _, k := range msgOrder {
+			m := msgs[k]
+			payload, err := json.Marshal(m)
 			if err != nil {
 				return err
 			}
-			if err := p.Store.QueueNotification(ctx, tx, pl.watch.UserID,
-				pl.out.Kind, string(payload), time.Time{}); err != nil {
+			userID := watchUser[k.watchID]
+			if err := p.Store.QueueNotification(ctx, tx, userID,
+				m.Kind, string(payload), time.Time{}); err != nil {
 				return err
 			}
 			res.notified++
@@ -295,6 +424,75 @@ func (p *Poller) evaluate(ctx context.Context, now time.Time, snap corescope.Sna
 	}
 	res.committed = true
 	return res, nil
+}
+
+// ruleObservation turns one rule plus what we know about its target into the
+// single (timestamp, applicable) pair the state machine consumes.
+//
+// The Applicable flag is the safety valve, and the per-type case is the one
+// that needs care. Our evidence only covers adverts and path hops at least
+// three bytes wide — roughly 41% of packets — so a node can be perfectly
+// healthy and still produce nothing we can attribute, if its traffic happens
+// to travel on narrow paths. Treating that silence as an outage would invent
+// failures out of the encoding, so a rule with no evidence at all stays
+// unknown and never fires. Once any evidence exists, the timestamps are
+// trustworthy: a 3-byte hop is unique across every node on the mesh.
+func ruleObservation(r store.Rule, obs corescope.Observation, known bool, acts []store.Activity) alert.Observation {
+	switch r.Source {
+	case store.SourceSeen:
+		return alert.Observation{At: obs.LastSeen, Applicable: known}
+
+	case store.SourceRelayed:
+		// A node that has never relayed has not stopped relaying.
+		return alert.Observation{
+			At:         obs.LastRelayed,
+			Applicable: known && !obs.LastRelayed.IsZero(),
+		}
+
+	case store.SourceTypes:
+		want := make(map[int]bool, len(r.Types))
+		for _, t := range r.Types {
+			want[t] = true
+		}
+		var latest time.Time
+		found := false
+		for _, a := range acts {
+			if !want[a.PayloadType] {
+				continue
+			}
+			if r.Direction != store.DirEither && a.Direction != r.Direction {
+				continue
+			}
+			found = true
+			if a.LastAt.After(latest) {
+				latest = a.LastAt
+			}
+		}
+		return alert.Observation{At: latest, Applicable: found}
+	}
+	return alert.Observation{}
+}
+
+// ruleLabel is what a rule is called in a message. Falls back to describing
+// the rule when the user has not named it.
+func ruleLabel(r store.Rule) string {
+	if strings.TrimSpace(r.Label) != "" {
+		return r.Label
+	}
+	switch r.Source {
+	case store.SourceSeen:
+		return "Not heard at all"
+	case store.SourceRelayed:
+		return "Stopped passing traffic"
+	}
+	names := make([]string, 0, len(r.Types))
+	for _, t := range r.Types {
+		names = append(names, corescope.TypeName(t))
+	}
+	if len(names) == 0 {
+		return "Custom rule"
+	}
+	return strings.Join(names, ", ")
 }
 
 func (p *Poller) now() time.Time {
