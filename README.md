@@ -11,10 +11,6 @@ instance — the same data behind
 [HopReach](https://github.com/A13xB0/hopreach)'s coverage map — and does
 nothing but watch it on your behalf.
 
-> ⚠️ **Early scaffold.** The repository layout, config schema, CI and
-> container build are in place; the service itself is being built out. It
-> does not run yet.
-
 ## Why
 
 On a real mesh, a dead repeater is easy to miss. On the network this was
@@ -45,6 +41,12 @@ Observers are watched separately, on whether they are still reporting packets.
 Alerts are deliberately quiet: one message when something goes down, one when
 it comes back, and nothing in between — no matter how long it stays down.
 
+## Status
+
+Feature-complete and running: sign-in, watches, polling, the alert engine and
+Discord delivery are all in place and tested. It has not yet been deployed
+anywhere public.
+
 ## Quick start
 
 ```bash
@@ -54,7 +56,31 @@ cp config.example.yaml config.yaml   # add your Discord app credentials
 docker compose up --build
 ```
 
-`config.example.yaml` documents every setting inline.
+`config.example.yaml` documents every setting inline. Without Discord
+credentials the service still starts and polls — you just can't sign in or
+receive alerts, which is a deliberately useful state for looking around
+first.
+
+## What it does about noise
+
+An alerting tool that cries wolf gets muted, and a muted tool is worthless.
+So:
+
+- **One message down, one message up.** A node offline for a week is one
+  message, not one every five minutes.
+- **Crossings must be confirmed.** A node hovering at your threshold doesn't
+  produce a stream of up/down messages.
+- **Nothing for something already broken.** Watch a node that's already quiet
+  and you get no alert — and no "recovered" message later either, because you
+  were never told it was down.
+- **Never alerts on a node that has never relayed.** 189 of the repeaters on
+  the live network have never appeared in a packet route; they haven't
+  *stopped* doing anything.
+- **Silence during our own outages.** If the upstream feed fails, returns
+  implausibly little, or freezes, HopReact evaluates nothing rather than
+  telling everyone their whole network died. And if a single poll would put
+  an implausible number of watches into alert at once, a breaker withholds
+  the lot and tells the operator instead.
 
 You will need a Discord application (client ID/secret, a bot token, and a
 guild for the bot to live in). A bot can only DM someone it shares a server

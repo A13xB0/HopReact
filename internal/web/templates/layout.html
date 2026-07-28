@@ -1,0 +1,79 @@
+{{define "layout"}}<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{.Title}} · {{.Cfg.Site.Name}}</title>
+<style>
+:root{--bg:#0a1929;--card:#0d2137;--border:#1e3a5f;--text:#e0e7ef;--muted:#8eafc4;
+--good:#4ade80;--warn:#facc15;--bad:#f87171;--accent:#5865F2}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);
+font:16px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}
+header{display:flex;align-items:center;justify-content:space-between;gap:1rem;
+flex-wrap:wrap;padding:.85rem 1.25rem;background:linear-gradient(90deg,#03045e,#023e8a);
+border-bottom:1px solid var(--border)}
+header h1{font-size:1.15rem;margin:0}
+header a{color:var(--text)}
+main{max-width:60rem;margin:0 auto;padding:1.25rem}
+a{color:#7aa7ff}
+.card{background:var(--card);border:1px solid var(--border);border-radius:10px;
+padding:1rem;margin-bottom:1rem}
+.row{display:flex;gap:.6rem;align-items:center;flex-wrap:wrap}
+.spread{justify-content:space-between}
+button,.btn{background:var(--accent);color:#fff;border:0;border-radius:8px;
+padding:.5rem .9rem;font:inherit;font-weight:600;cursor:pointer;text-decoration:none;
+display:inline-block}
+button.secondary{background:transparent;border:1px solid var(--border);color:var(--text)}
+button.danger{background:#7f1d1d}
+input,select{background:#0a1929;color:var(--text);border:1px solid var(--border);
+border-radius:8px;padding:.45rem .55rem;font:inherit}
+table{width:100%;border-collapse:collapse}
+th,td{text-align:left;padding:.5rem .4rem;border-bottom:1px solid var(--border);
+vertical-align:top}
+th{color:var(--muted);font-size:.78rem;text-transform:uppercase;letter-spacing:.04em}
+.pill{display:inline-block;padding:.1rem .5rem;border-radius:999px;font-size:.75rem;
+font-weight:700}
+.good{background:rgba(74,222,128,.15);color:var(--good)}
+.warn{background:rgba(250,204,21,.15);color:var(--warn)}
+.bad{background:rgba(248,113,113,.15);color:var(--bad)}
+.muted{background:rgba(142,175,196,.15);color:var(--muted)}
+.small{font-size:.8rem;color:var(--muted)}
+.banner{border-left:3px solid var(--warn);padding:.7rem .9rem;border-radius:8px;
+background:rgba(250,204,21,.08);margin-bottom:1rem}
+.banner.bad{border-left-color:var(--bad);background:rgba(248,113,113,.08)}
+.banner.ok{border-left-color:var(--good);background:rgba(74,222,128,.08)}
+footer{max-width:60rem;margin:0 auto;padding:1.25rem;color:var(--muted);font-size:.8rem}
+@media(max-width:640px){
+  table,thead,tbody,tr,th,td{display:block}
+  thead{display:none}
+  tr{border:1px solid var(--border);border-radius:8px;margin-bottom:.7rem;padding:.5rem}
+  td{border:0;padding:.25rem .35rem}
+}
+</style>
+</head><body>
+<header>
+  <h1><a href="/" style="text-decoration:none">{{.Cfg.Site.Name}}</a></h1>
+  <div class="row">
+    {{if .User}}
+      <span class="small">{{.User.Username}}</span>
+      <a class="btn secondary" href="/watches">Your nodes</a>
+      <form method="post" action="/auth/logout" style="margin:0">
+        <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+        <button class="secondary" type="submit">Sign out</button>
+      </form>
+    {{else}}
+      <a class="btn" href="/auth/login">Sign in with Discord</a>
+    {{end}}
+  </div>
+</header>
+<main>
+{{if .Flash}}<div class="banner {{if eq .FlashKind "error"}}bad{{else}}ok{{end}}">{{.Flash}}</div>{{end}}
+{{template "content" .}}
+</main>
+<footer>
+  {{.Cfg.Site.Name}} {{.Version}} ·
+  <a href="https://github.com/A13xB0/hopreact">source</a>
+  {{if .Cfg.Site.PrivacyPolicyURL}} · <a href="{{.Cfg.Site.PrivacyPolicyURL}}">privacy policy</a>{{end}}
+  <br>No email address, no password — HopReact only ever knows your Discord account.
+</footer>
+</body></html>{{end}}

@@ -1,29 +1,46 @@
 // Command hopreact watches a CoreScope instance and sends a Discord DM when
 // a repeater or observer someone has claimed stops being seen.
 //
-// One process does both halves: an HTTP server for sign-in and the
-// dashboard, and a single background poller that fetches CoreScope and
-// evaluates every watch against it. They share one SQLite database, which
-// is also why there must only ever be one instance running — see the
-// single-instance lock (added with the poller).
-//
-// This file is currently the scaffold's entry point: it parses the config
-// flag and reports the build, so the repository builds and CI is green from
-// the first commit. The server and poller land in their own phases.
+// One process does everything: an HTTP server for sign-in and the dashboard,
+// a poller that fetches CoreScope and evaluates every watch against it, and a
+// drainer that turns the resulting decisions into DMs. They share one SQLite
+// database, which is also why exactly one instance may run at a time — see
+// the lock below.
 package main
 
 import (
+	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
+	"time"
 
 	"hopreact/internal/buildinfo"
+	"hopreact/internal/config"
+	"hopreact/internal/corescope"
+	"hopreact/internal/discord"
+	"hopreact/internal/notify"
+	"hopreact/internal/poller"
+	"hopreact/internal/store"
+	"hopreact/internal/web"
 )
 
+// drainInterval is how often the outbox is swept. Much shorter than the poll
+// interval so an alert produced by a poll goes out promptly rather than
+// waiting for the next one.
+const drainInterval = 20 * time.Second
+
+// membershipInterval is how often we re-check that users are still in the
+// alert server. Someone who quietly left has alerts that will never arrive,
+// and finding that out when their repeater dies is the wrong time.
+const membershipInterval = 6 * time.Hour
+
 func main() {
-	// Same flag, same help string, as HopReach's binaries — the config path
-	// is the only thing not itself configured in the config file.
 	configFlag := flag.String("config", "", "path to config.yaml (default: $HOPREACT_CONFIG, then ./config.yaml)")
 	showVersion := flag.Bool("version", false, "print the version and exit")
 	flag.Parse()
@@ -33,7 +50,154 @@ func main() {
 		return
 	}
 
-	slog.Info("hopreact starting", "version", buildinfo.Version, "config_flag", *configFlag)
-	slog.Error("not implemented yet: this is the project scaffold")
-	os.Exit(1)
+	log := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
+
+	cfg, path, err := config.Load(*configFlag)
+	if err != nil {
+		log.Error("config", "err", err)
+		os.Exit(1)
+	}
+	log.Info("hopreact starting", "version", buildinfo.Version, "config", path)
+
+	st, err := store.Open(cfg.DataDir, time.Now)
+	if err != nil {
+		log.Error("opening database", "err", err)
+		os.Exit(1)
+	}
+	defer st.Close()
+
+	// SQLite plus an in-process ticker means exactly one instance. Two
+	// replicas would double every alert, which is the sort of thing nobody
+	// notices until users complain.
+	unlock, err := lockDataDir(cfg.DataDir)
+	if err != nil {
+		log.Error("another hopreact appears to be running against this data directory", "err", err, "dir", cfg.DataDir)
+		os.Exit(1)
+	}
+	defer unlock()
+
+	scope := corescope.NewClient(cfg.CoreScope.APIURL, cfg.RequestTimeout(), nil)
+	dc := discord.New(cfg.Discord.ClientID, cfg.Discord.ClientSecret,
+		cfg.Discord.BotToken, cfg.Discord.GuildID,
+		cfg.Site.BaseURL+"/auth/callback", nil)
+
+	if !cfg.DiscordConfigured() {
+		// Deliberately not fatal: bringing the service up and looking around
+		// before creating the Discord application is a legitimate thing to
+		// do, and the UI says so plainly.
+		log.Warn("Discord is not configured — sign-in and alerts are disabled until discord.* is filled in")
+	}
+
+	srv, err := web.New(st, dc, cfg, log)
+	if err != nil {
+		log.Error("building web server", "err", err)
+		os.Exit(1)
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	pl := &poller.Poller{
+		Store: st, Scope: scope, Cfg: cfg, Log: log, Now: time.Now,
+		OnBreaker: func(ctx context.Context, reason string) {
+			if cfg.Discord.OperatorUserID == "" || !cfg.DiscordConfigured() {
+				return
+			}
+			msg := "⚠️ **HopReact alert breaker tripped**\n" + reason +
+				"\nNo user alerts were sent for this poll. Check the upstream feed."
+			if err := dc.SendDM(ctx, cfg.Discord.OperatorUserID, msg); err != nil {
+				log.Error("could not notify the operator about the breaker", "err", err)
+			}
+		},
+	}
+	nt := &notify.Notifier{Store: st, Sender: dc, Log: log, BaseURL: cfg.Site.BaseURL, Now: time.Now}
+
+	pollTicker := time.NewTicker(cfg.Poll.Interval)
+	defer pollTicker.Stop()
+	go pl.Run(ctx, pollTicker.C)
+
+	if cfg.DiscordConfigured() {
+		drainTicker := time.NewTicker(drainInterval)
+		defer drainTicker.Stop()
+		go nt.Run(ctx, drainTicker.C)
+		go runMembershipChecks(ctx, st, dc, log)
+	}
+	go runHousekeeping(ctx, st, log)
+
+	httpSrv := &http.Server{
+		Addr:              cfg.HTTP.Listen,
+		Handler:           srv.Routes(),
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+	go func() {
+		log.Info("listening", "addr", cfg.HTTP.Listen, "base_url", cfg.Site.BaseURL)
+		if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Error("http server", "err", err)
+			stop()
+		}
+	}()
+
+	<-ctx.Done()
+	log.Info("shutting down")
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := httpSrv.Shutdown(shutdownCtx); err != nil {
+		log.Error("shutdown", "err", err)
+	}
+}
+
+// runMembershipChecks periodically confirms each user is still in the alert
+// server, so a silent departure shows up on their dashboard rather than as
+// alerts that simply never arrive.
+func runMembershipChecks(ctx context.Context, st *store.Store, dc *discord.Client, log *slog.Logger) {
+	t := time.NewTicker(membershipInterval)
+	defer t.Stop()
+	check := func() {
+		users, err := st.UsersWithWatches(ctx)
+		if err != nil {
+			log.Error("listing users for membership check", "err", err)
+			return
+		}
+		for _, u := range users {
+			member, err := dc.CheckMembership(ctx, u.DiscordID)
+			if err != nil {
+				continue // transient; leave the current status alone
+			}
+			reason := ""
+			if !member {
+				reason = "You are no longer in the HopReact Discord server, so the bot cannot DM you."
+			}
+			if member != u.DMOK {
+				if err := st.SetDMStatus(ctx, u.ID, member, reason); err != nil {
+					log.Error("recording DM status", "err", err)
+				}
+			}
+		}
+	}
+	check()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			check()
+		}
+	}
+}
+
+func runHousekeeping(ctx context.Context, st *store.Store, log *slog.Logger) {
+	t := time.NewTicker(time.Hour)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			if n, err := st.DeleteExpiredSessions(ctx); err != nil {
+				log.Error("pruning sessions", "err", err)
+			} else if n > 0 {
+				log.Info("pruned expired sessions", "count", n)
+			}
+		}
+	}
 }

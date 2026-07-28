@@ -1,0 +1,33 @@
+{{define "content"}}
+<div class="card">
+  <h2 style="margin-top:0">Know when your repeater goes quiet</h2>
+  <p>Tell HopReact which MeshCore repeaters and observers are yours, choose how
+  many hours of silence means trouble, and the bot will send you a Discord DM
+  when one stops being seen.</p>
+  <p class="small">It watches the same public CoreScope data the coverage map
+  uses. There is no email address and no password involved — signing in with
+  Discord is the whole account.</p>
+  <p><a class="btn" href="/auth/login">Sign in with Discord</a></p>
+</div>
+<div class="card">
+  <h3 style="margin-top:0">How the alerts behave</h3>
+  <ul>
+    <li><strong>One message when it goes down, one when it returns.</strong>
+      A node that stays down for a week doesn't message you every five minutes.</li>
+    <li><strong>Nothing for something already broken.</strong> Add a watch to a
+      node that is already quiet and you get no alert — you knew.</li>
+    <li><strong>Not heard</strong> is the default signal. You can additionally
+      alert on <strong>stopped relaying</strong> for a node that should be
+      carrying traffic.</li>
+    <li><strong>Quiet during an outage of ours.</strong> If the upstream data
+      looks broken or frozen, HopReact says nothing rather than telling everyone
+      their whole network died.</li>
+  </ul>
+</div>
+<div class="card">
+  <h3 style="margin-top:0">One thing to know</h3>
+  <p>A Discord bot can only DM someone it shares a server with, so signing in
+  adds you to the {{.Cfg.Site.Name}} Discord. <strong>Stay in it</strong> —
+  leaving silently stops the alerts arriving.</p>
+</div>
+{{end}}

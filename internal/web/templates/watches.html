@@ -1,0 +1,98 @@
+{{define "content"}}
+{{if .User}}{{if not .User.DMOK}}
+<div class="banner bad">
+  <strong>Your alerts can't be delivered.</strong>
+  {{if .User.DMFailedReason}}{{.User.DMFailedReason}}{{end}}
+  <div class="row" style="margin-top:.5rem">
+    <a class="btn" href="/auth/login">Rejoin the Discord server</a>
+    <form method="post" action="/account/test-dm" style="margin:0">
+      <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+      <button class="secondary" type="submit">Send a test DM</button>
+    </form>
+  </div>
+</div>
+{{end}}{{end}}
+
+{{if not .FeedHealth.Healthy}}
+<div class="banner">
+  <strong>Upstream data is stale.</strong> {{.FeedHealth.Reason}}
+  Alerts are paused until it recovers, so the states below may be out of date.
+  {{if not .FeedHealth.LastOK.IsZero}}<br><span class="small">Last good poll: {{stamp .FeedHealth.LastOK}}</span>{{end}}
+</div>
+{{end}}
+
+<div class="card">
+  <div class="row spread">
+    <h2 style="margin:0">Your nodes</h2>
+    <div class="row">
+      <form method="post" action="/account/test-dm" style="margin:0">
+        <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+        <button class="secondary" type="submit">Send a test DM</button>
+      </form>
+      <a class="btn" href="/search">Add a node</a>
+    </div>
+  </div>
+</div>
+
+{{if not .Watches}}
+<div class="card"><p style="margin:0">Nothing watched yet.
+<a href="/search">Add a repeater or observer</a> and pick how long it may stay
+quiet before HopReact messages you.</p></div>
+{{else}}
+<div class="card">
+<table>
+<thead><tr><th>Node</th><th>Status</th><th>Last seen</th><th>Threshold</th><th></th></tr></thead>
+<tbody>
+{{range .Watches}}
+<tr>
+  <td>
+    <strong>{{if .Target}}{{.Target.Name}}{{else}}{{.Watch.TargetKey}}{{end}}</strong><br>
+    <span class="small">{{.Watch.TargetKind}}{{if .Target}}{{if .Target.Role}} · {{.Target.Role}}{{end}}{{end}}</span>
+  </td>
+  <td>
+    <span class="pill {{stateClass .Seen}}">{{stateLabel .Seen}}</span>
+    {{if .Relay}}<br><span class="pill {{stateClass .Relay}}" style="margin-top:.25rem">relay: {{stateLabel .Relay}}</span>{{end}}
+    {{if .Watch.MutedUntil.IsZero}}{{else}}<br><span class="small">muted until {{stamp .Watch.MutedUntil}}</span>{{end}}
+  </td>
+  <td>
+    {{if .Target}}{{since .Target.LastSeen $.Now}}<br><span class="small">{{stamp .Target.LastSeen}}</span>
+    {{if .Watch.AlertOnRelay}}<br><span class="small">relayed {{since .Target.LastRelayed $.Now}}</span>{{end}}
+    {{else}}<span class="small">CoreScope has never reported this key</span>{{end}}
+  </td>
+  <td>
+    <form method="post" action="/watches/{{.Watch.ID}}/update" class="row" style="margin:0">
+      <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
+      <input type="number" name="threshold_hours" min="1" max="720" value="{{.Watch.ThresholdHours}}" style="width:5rem"> h
+      <label class="small"><input type="checkbox" name="alert_on_relay" {{if .Watch.AlertOnRelay}}checked{{end}}> also if not relaying</label>
+      <select name="mute_hours" class="small">
+        <option value="0">don't mute</option>
+        <option value="4">mute 4h</option>
+        <option value="24">mute 24h</option>
+        <option value="168">mute 7d</option>
+      </select>
+      <button class="secondary" type="submit">Save</button>
+    </form>
+  </td>
+  <td>
+    <form method="post" action="/watches/{{.Watch.ID}}/delete" style="margin:0">
+      <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
+      <button class="danger" type="submit">Remove</button>
+    </form>
+  </td>
+</tr>
+{{end}}
+</tbody>
+</table>
+</div>
+{{end}}
+
+<div class="card">
+  <h3 style="margin-top:0">Account</h3>
+  <p class="small">HopReact stores your Discord account id and display name, which
+  nodes you watch, and when they were last seen. Nothing else.</p>
+  <form method="post" action="/account/delete" onsubmit="return confirm('Delete your account and all your watches?')">
+    <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+    <button class="danger" type="submit">Delete my account</button>
+  </form>
+</div>
+{{end}}

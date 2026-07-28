@@ -1,0 +1,43 @@
+{{define "content"}}
+<div class="card">
+  <h2 style="margin-top:0">Add a node</h2>
+  <form method="get" action="/search" class="row">
+    <input type="search" name="q" value="{{.Query}}" placeholder="Search by name or public key" style="flex:1;min-width:14rem">
+    <button type="submit">Search</button>
+    <a class="btn secondary" href="/watches">Back</a>
+  </form>
+  <p class="small">{{.FeedHealth.TargetsKn}} nodes and observers known. Showing the most recently seen first.</p>
+</div>
+
+{{if not .Results}}
+<div class="card"><p style="margin:0">Nothing matched. {{if not .FeedHealth.Healthy}}The upstream feed is currently unavailable, so the list may be empty or stale.{{end}}</p></div>
+{{else}}
+<div class="card">
+<table>
+<thead><tr><th>Name</th><th>Kind</th><th>Last seen</th><th>Watch it</th></tr></thead>
+<tbody>
+{{range .Results}}
+<tr>
+  <td><strong>{{if .Name}}{{.Name}}{{else}}(unnamed){{end}}</strong><br>
+      <span class="small">{{.Key}}</span></td>
+  <td>{{.Kind}}{{if .Role}}<br><span class="small">{{.Role}}</span>{{end}}</td>
+  <td>{{since .LastSeen $.Now}}<br><span class="small">{{stamp .LastSeen}}</span></td>
+  <td>
+    <form method="post" action="/watches" class="row" style="margin:0">
+      <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
+      <input type="hidden" name="kind" value="{{.Kind}}">
+      <input type="hidden" name="key" value="{{.Key}}">
+      <input type="number" name="threshold_hours" min="1" max="720" value="6" style="width:4.5rem" title="Hours of silence before you're alerted"> h
+      {{if eq .Kind "node"}}
+        <label class="small" title="Only useful for a node that should be carrying traffic"><input type="checkbox" name="alert_on_relay"> also if not relaying</label>
+      {{end}}
+      <button type="submit">Watch</button>
+    </form>
+  </td>
+</tr>
+{{end}}
+</tbody>
+</table>
+</div>
+{{end}}
+{{end}}

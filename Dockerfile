@@ -2,8 +2,9 @@
 #
 # Unlike HopReach, nothing here needs cgo — the SQLite driver is
 # modernc.org/sqlite (pure Go), chosen precisely so this stays
-# CGO_ENABLED=0 and the runtime image can be minimal.
-FROM golang:1.23-bookworm AS build
+# CGO_ENABLED=0 and the runtime image can be minimal. That driver sets the
+# module's Go floor, so this tag and go.mod's `go` line move together.
+FROM golang:1.25-bookworm AS build
 ARG VERSION=dev
 WORKDIR /src
 
