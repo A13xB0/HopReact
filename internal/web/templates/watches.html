@@ -63,7 +63,7 @@ quiet before HopReact messages you.</p></div>
     <form method="post" action="/watches/{{.Watch.ID}}/update" class="row" style="margin:0">
       <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
       <input type="number" name="threshold_hours" min="1" max="720" value="{{.Watch.ThresholdHours}}" style="width:5rem"> h
-      <label class="small"><input type="checkbox" name="alert_on_relay" {{if .Watch.AlertOnRelay}}checked{{end}}> also if not relaying</label>
+      <label class="small" title="A repeater can still be heard while no longer forwarding anyone else's packets."><input type="checkbox" name="alert_on_relay" {{if .Watch.AlertOnRelay}}checked{{end}}> also if it stops passing traffic</label>
       <select name="mute_hours" class="small">
         <option value="0">don't mute</option>
         <option value="4">mute 4h</option>

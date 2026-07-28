@@ -4,55 +4,121 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{{.Title}} · {{.Cfg.Site.Name}}</title>
 <style>
-:root{--bg:#0a1929;--card:#0d2137;--border:#1e3a5f;--text:#e0e7ef;--muted:#8eafc4;
---good:#4ade80;--warn:#facc15;--bad:#f87171;--accent:#5865F2}
+:root{
+  --bg:#0a1929; --card:#0d2137; --border:#1e3a5f;
+  --text:#e6edf5; --muted:#8fa9c0; --dim:#5f7d99;
+  --good:#4ade80; --warn:#facc15; --bad:#f87171; --accent:#5865F2;
+  --radius:12px;
+}
 *{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%}
 body{margin:0;background:var(--bg);color:var(--text);
-font:16px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}
+  font:16px/1.55 system-ui,-apple-system,"Segoe UI",sans-serif}
+a{color:#8ab4ff}
+
+/* ---------- chrome ---------- */
 header{display:flex;align-items:center;justify-content:space-between;gap:1rem;
-flex-wrap:wrap;padding:.85rem 1.25rem;background:linear-gradient(90deg,#03045e,#023e8a);
-border-bottom:1px solid var(--border)}
-header h1{font-size:1.15rem;margin:0}
-header a{color:var(--text)}
-main{max-width:60rem;margin:0 auto;padding:1.25rem}
-a{color:#7aa7ff}
-.card{background:var(--card);border:1px solid var(--border);border-radius:10px;
-padding:1rem;margin-bottom:1rem}
+  flex-wrap:wrap;padding:.8rem 1.25rem;background:linear-gradient(90deg,#03045e,#023e8a);
+  border-bottom:1px solid var(--border)}
+header .brand{display:flex;align-items:center;gap:.55rem;font-weight:700;
+  font-size:1.05rem;color:var(--text);text-decoration:none}
+header .brand .dot{width:9px;height:9px;border-radius:50%;background:var(--good);
+  box-shadow:0 0 0 3px rgba(74,222,128,.18)}
+main{max-width:64rem;margin:0 auto;padding:1.25rem}
+footer{max-width:64rem;margin:0 auto;padding:1.25rem;color:var(--dim);font-size:.8rem}
+
+/* ---------- surfaces ---------- */
+.card{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);
+  padding:1.1rem;margin-bottom:1rem}
+.card h2,.card h3{margin:0 0 .5rem}
 .row{display:flex;gap:.6rem;align-items:center;flex-wrap:wrap}
 .spread{justify-content:space-between}
-button,.btn{background:var(--accent);color:#fff;border:0;border-radius:8px;
-padding:.5rem .9rem;font:inherit;font-weight:600;cursor:pointer;text-decoration:none;
-display:inline-block}
-button.secondary{background:transparent;border:1px solid var(--border);color:var(--text)}
-button.danger{background:#7f1d1d}
-input,select{background:#0a1929;color:var(--text);border:1px solid var(--border);
-border-radius:8px;padding:.45rem .55rem;font:inherit}
-table{width:100%;border-collapse:collapse}
-th,td{text-align:left;padding:.5rem .4rem;border-bottom:1px solid var(--border);
-vertical-align:top}
-th{color:var(--muted);font-size:.78rem;text-transform:uppercase;letter-spacing:.04em}
-.pill{display:inline-block;padding:.1rem .5rem;border-radius:999px;font-size:.75rem;
-font-weight:700}
-.good{background:rgba(74,222,128,.15);color:var(--good)}
-.warn{background:rgba(250,204,21,.15);color:var(--warn)}
-.bad{background:rgba(248,113,113,.15);color:var(--bad)}
-.muted{background:rgba(142,175,196,.15);color:var(--muted)}
 .small{font-size:.8rem;color:var(--muted)}
-.banner{border-left:3px solid var(--warn);padding:.7rem .9rem;border-radius:8px;
-background:rgba(250,204,21,.08);margin-bottom:1rem}
+.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.74rem;
+  color:var(--dim)}
+
+/* ---------- controls ---------- */
+button,.btn{background:var(--accent);color:#fff;border:0;border-radius:9px;
+  padding:.5rem .95rem;font:inherit;font-weight:600;cursor:pointer;
+  text-decoration:none;display:inline-block;line-height:1.2}
+button:hover,.btn:hover{filter:brightness(1.08)}
+button.secondary,.btn.secondary{background:transparent;border:1px solid var(--border);
+  color:var(--text)}
+button.secondary:hover{border-color:var(--accent)}
+button.danger{background:#7f1d1d}
+input,select{background:#08131f;color:var(--text);border:1px solid var(--border);
+  border-radius:9px;padding:.5rem .6rem;font:inherit}
+input:focus,select:focus,button:focus-visible,a:focus-visible{outline:2px solid var(--accent);
+  outline-offset:2px}
+input[type=number]{width:4.6rem}
+label{cursor:pointer}
+
+.searchbar{display:flex;gap:.6rem;flex-wrap:wrap}
+.searchbar input[type=search]{flex:1;min-width:12rem}
+
+/* ---------- node list ---------- */
+.list{display:flex;flex-direction:column;gap:.6rem}
+.node{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);
+  padding:.85rem 1rem;display:grid;gap:.75rem;
+  grid-template-columns:minmax(0,1fr) auto;align-items:start}
+.node:hover{border-color:#2b5183}
+.node-main{min-width:0}
+.node-title{display:flex;align-items:center;gap:.5rem;flex-wrap:wrap;
+  font-weight:700;font-size:1rem}
+.node-meta{display:flex;align-items:center;gap:.5rem;flex-wrap:wrap;
+  margin-top:.2rem;font-size:.8rem;color:var(--muted)}
+.node-key{margin-top:.25rem}
+.node-actions{display:flex;flex-direction:column;gap:.5rem;align-items:flex-end}
+.field{display:flex;align-items:center;gap:.4rem;font-size:.82rem;color:var(--muted);
+  white-space:nowrap}
+
+/* ---------- pills / tags ---------- */
+.pill{display:inline-flex;align-items:center;gap:.35rem;padding:.12rem .55rem;
+  border-radius:999px;font-size:.74rem;font-weight:700;white-space:nowrap}
+.pill .dot{width:7px;height:7px;border-radius:50%;background:currentColor}
+.good{background:rgba(74,222,128,.14);color:var(--good)}
+.warn{background:rgba(250,204,21,.14);color:var(--warn)}
+.bad{background:rgba(248,113,113,.14);color:var(--bad)}
+.muted{background:rgba(143,169,192,.14);color:var(--muted)}
+.tag{display:inline-block;padding:.1rem .45rem;border-radius:6px;font-size:.7rem;
+  font-weight:700;letter-spacing:.03em;text-transform:uppercase;
+  background:rgba(88,101,242,.16);color:#9aa6ff}
+.tag.observer{background:rgba(34,211,238,.14);color:#67e8f9}
+
+/* ---------- the relay opt-in ---------- */
+.relay-opt{display:flex;gap:.45rem;align-items:flex-start;max-width:19rem;
+  font-size:.78rem;color:var(--muted);line-height:1.35;text-align:left}
+.relay-opt input{margin-top:.2rem;flex-shrink:0}
+.relay-opt b{color:var(--text);font-weight:600}
+
+/* ---------- banners ---------- */
+.banner{border-left:3px solid var(--warn);padding:.75rem .95rem;border-radius:10px;
+  background:rgba(250,204,21,.08);margin-bottom:1rem}
 .banner.bad{border-left-color:var(--bad);background:rgba(248,113,113,.08)}
 .banner.ok{border-left-color:var(--good);background:rgba(74,222,128,.08)}
-footer{max-width:60rem;margin:0 auto;padding:1.25rem;color:var(--muted);font-size:.8rem}
-@media(max-width:640px){
+
+/* ---------- tables ---------- */
+table{width:100%;border-collapse:collapse}
+th,td{text-align:left;padding:.6rem .45rem;border-bottom:1px solid var(--border);
+  vertical-align:top}
+th{color:var(--dim);font-size:.72rem;text-transform:uppercase;letter-spacing:.05em}
+tr:last-child td{border-bottom:0}
+
+@media(max-width:720px){
+  main,footer{padding:1rem .85rem}
+  .node{grid-template-columns:1fr}
+  .node-actions{align-items:stretch}
+  .node-actions form{width:100%}
+  .relay-opt{max-width:none}
   table,thead,tbody,tr,th,td{display:block}
   thead{display:none}
-  tr{border:1px solid var(--border);border-radius:8px;margin-bottom:.7rem;padding:.5rem}
-  td{border:0;padding:.25rem .35rem}
+  tr{border:1px solid var(--border);border-radius:10px;margin-bottom:.7rem;padding:.6rem}
+  td{border:0;padding:.3rem .35rem}
 }
 </style>
 </head><body>
 <header>
-  <h1><a href="/" style="text-decoration:none">{{.Cfg.Site.Name}}</a></h1>
+  <a class="brand" href="/"><span class="dot" aria-hidden="true"></span>{{.Cfg.Site.Name}}</a>
   <div class="row">
     {{if .User}}
       <span class="small">{{.User.Username}}</span>
@@ -72,7 +138,7 @@ footer{max-width:60rem;margin:0 auto;padding:1.25rem;color:var(--muted);font-siz
 </main>
 <footer>
   {{.Cfg.Site.Name}} {{.Version}} ·
-  <a href="https://github.com/A13xB0/hopreact">source</a>
+  <a href="https://github.com/A13xB0/HopReact">source</a>
   {{if .Cfg.Site.PrivacyPolicyURL}} · <a href="{{.Cfg.Site.PrivacyPolicyURL}}">privacy policy</a>{{end}}
   <br>No email address, no password — HopReact only ever knows your Discord account.
 </footer>

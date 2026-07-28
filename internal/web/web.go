@@ -26,6 +26,7 @@ import (
 
 	"hopreact/internal/buildinfo"
 	"hopreact/internal/config"
+	"hopreact/internal/corescope"
 	"hopreact/internal/discord"
 	"hopreact/internal/store"
 )
@@ -65,6 +66,9 @@ func New(st *store.Store, dc *discord.Client, cfg config.Config, log *slog.Logge
 		"stamp":      stamp,
 		"stateLabel": stateLabel,
 		"stateClass": stateClass,
+		"freshClass": freshClass,
+		"shortKey":   shortKey,
+		"canRelay":   canRelay,
 	}
 	pages := map[string]*template.Template{}
 	for _, page := range []string{"index.html", "watches.html", "search.html"} {
@@ -586,6 +590,45 @@ func redirectFlash(w http.ResponseWriter, r *http.Request, path, msg, kind strin
 
 func flashFrom(r *http.Request) (string, string) {
 	return r.URL.Query().Get("msg"), r.URL.Query().Get("kind")
+}
+
+// canRelay reports whether "stopped passing traffic" is a question that can
+// even be asked of this target.
+//
+// Only a repeater forwards other people's packets. An observer reports what
+// it hears rather than relaying it, and a companion originates and receives
+// only — it never relays, so offering the option there would be a control
+// that can never do anything. (The alert engine already refuses to fire on
+// a target that has never relayed; this stops the UI implying otherwise in
+// the first place.)
+func canRelay(kind, role string) bool {
+	return kind == string(corescope.KindNode) && role == "repeater"
+}
+
+// freshClass maps a last-seen time onto the same three-state colour the
+// dashboard uses, so "seen 4m ago" and "seen 9d ago" don't look alike at a
+// glance.
+func freshClass(t time.Time, now time.Time) string {
+	if t.IsZero() {
+		return "muted"
+	}
+	switch age := now.Sub(t); {
+	case age <= 6*time.Hour:
+		return "good"
+	case age <= 24*time.Hour:
+		return "warn"
+	default:
+		return "bad"
+	}
+}
+
+// shortKey trims a 64-hex public key to something readable. The full value
+// stays in the element's title attribute, so it is still copyable.
+func shortKey(k string) string {
+	if len(k) <= 20 {
+		return k
+	}
+	return k[:10] + "…" + k[len(k)-6:]
 }
 
 func humanSince(t time.Time, now time.Time) string {

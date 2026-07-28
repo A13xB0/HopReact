@@ -371,3 +371,85 @@ func TestSecurityHeadersArePresent(t *testing.T) {
 }
 
 func itoa(i int64) string { return strconv.FormatInt(i, 10) }
+
+// "Stop passing traffic" is only a question you can ask of a repeater. An
+// observer reports what it hears rather than forwarding it, and a companion
+// never relays at all — offering the option there is a control that can
+// never do anything, which is exactly what it looked like in the UI.
+func TestRelayOptionOnlyOfferedForRepeaters(t *testing.T) {
+	if !canRelay("node", "repeater") {
+		t.Error("a repeater must be offered the relay option")
+	}
+	for _, tt := range []struct{ kind, role string }{
+		{"node", "companion"}, // never relays
+		{"node", "room"},
+		{"node", ""},
+		{"observer", ""},
+		{"observer", "repeater"}, // observed as a station, not a relay here
+	} {
+		if canRelay(tt.kind, tt.role) {
+			t.Errorf("kind=%q role=%q must not be offered the relay option", tt.kind, tt.role)
+		}
+	}
+}
+
+// Rendered end to end: a companion in the results must not carry the
+// checkbox, a repeater must.
+func TestSearchPageOffersRelayOptionOnlyForRepeaters(t *testing.T) {
+	srv, st, h := newServer(t)
+	ctx := context.Background()
+	if _, err := st.UpsertTargets(ctx, []corescope.Observation{
+		{Kind: corescope.KindNode, Key: "aa", Name: "A Repeater", Role: "repeater", LastSeen: t0.Add(-time.Minute)},
+		{Kind: corescope.KindNode, Key: "bb", Name: "A Companion", Role: "companion", LastSeen: t0.Add(-time.Minute)},
+		{Kind: corescope.KindObserver, Key: "cc", Name: "An Observer", LastSeen: t0.Add(-time.Minute)},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cookie, _, _ := signIn(t, srv, st)
+
+	req := httptest.NewRequest(http.MethodGet, "/search", nil)
+	req.AddCookie(cookie)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	body := rec.Body.String()
+
+	if n := strings.Count(body, `name="alert_on_relay"`); n != 1 {
+		t.Errorf("found %d relay checkboxes, want exactly 1 (only the repeater)", n)
+	}
+	// The old wording said "also if not relaying", which meant nothing to
+	// anyone who hadn't read the source.
+	if !strings.Contains(body, "stops passing traffic") {
+		t.Error("the relay option should explain itself in plain words")
+	}
+	if strings.Contains(body, "also if not relaying") {
+		t.Error("the old opaque wording is still present")
+	}
+}
+
+func TestFreshnessAndKeyHelpers(t *testing.T) {
+	now := t0
+	for _, tt := range []struct {
+		age  time.Duration
+		want string
+	}{
+		{time.Minute, "good"},
+		{12 * time.Hour, "warn"},
+		{72 * time.Hour, "bad"},
+	} {
+		if got := freshClass(now.Add(-tt.age), now); got != tt.want {
+			t.Errorf("freshClass(%v ago) = %q, want %q", tt.age, got, tt.want)
+		}
+	}
+	if got := freshClass(time.Time{}, now); got != "muted" {
+		t.Errorf("freshClass(never) = %q, want muted", got)
+	}
+
+	full := "d41ee22644b0ea3aee70958cc5f4e87a1cfdbb1f404396dc0a7be3e7030df741"
+	short := shortKey(full)
+	if len(short) >= len(full) || !strings.HasPrefix(short, "d41ee22644") {
+		t.Errorf("shortKey = %q", short)
+	}
+	if got := shortKey("abc"); got != "abc" {
+		t.Errorf("a short key should be left alone, got %q", got)
+	}
+}

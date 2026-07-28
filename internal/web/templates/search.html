@@ -1,43 +1,75 @@
 {{define "content"}}
 <div class="card">
-  <h2 style="margin-top:0">Add a node</h2>
-  <form method="get" action="/search" class="row">
-    <input type="search" name="q" value="{{.Query}}" placeholder="Search by name or public key" style="flex:1;min-width:14rem">
-    <button type="submit">Search</button>
+  <div class="row spread" style="margin-bottom:.7rem">
+    <h2 style="margin:0">Add a node</h2>
     <a class="btn secondary" href="/watches">Back</a>
+  </div>
+  <form method="get" action="/search" class="searchbar">
+    <input type="search" name="q" value="{{.Query}}" placeholder="Search by name or public key" autofocus>
+    <button type="submit">Search</button>
   </form>
-  <p class="small">{{.FeedHealth.TargetsKn}} nodes and observers known. Showing the most recently seen first.</p>
+  <p class="small" style="margin:.7rem 0 0">
+    {{.FeedHealth.TargetsKn}} nodes and observers known, most recently seen first.
+    Pick how long one may stay silent before HopReact messages you.
+  </p>
 </div>
 
-{{if not .Results}}
-<div class="card"><p style="margin:0">Nothing matched. {{if not .FeedHealth.Healthy}}The upstream feed is currently unavailable, so the list may be empty or stale.{{end}}</p></div>
-{{else}}
-<div class="card">
-<table>
-<thead><tr><th>Name</th><th>Kind</th><th>Last seen</th><th>Watch it</th></tr></thead>
-<tbody>
-{{range .Results}}
-<tr>
-  <td><strong>{{if .Name}}{{.Name}}{{else}}(unnamed){{end}}</strong><br>
-      <span class="small">{{.Key}}</span></td>
-  <td>{{.Kind}}{{if .Role}}<br><span class="small">{{.Role}}</span>{{end}}</td>
-  <td>{{since .LastSeen $.Now}}<br><span class="small">{{stamp .LastSeen}}</span></td>
-  <td>
-    <form method="post" action="/watches" class="row" style="margin:0">
-      <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
-      <input type="hidden" name="kind" value="{{.Kind}}">
-      <input type="hidden" name="key" value="{{.Key}}">
-      <input type="number" name="threshold_hours" min="1" max="720" value="6" style="width:4.5rem" title="Hours of silence before you're alerted"> h
-      {{if eq .Kind "node"}}
-        <label class="small" title="Only useful for a node that should be carrying traffic"><input type="checkbox" name="alert_on_relay"> also if not relaying</label>
-      {{end}}
-      <button type="submit">Watch</button>
-    </form>
-  </td>
-</tr>
+{{if not .FeedHealth.Healthy}}
+<div class="banner">
+  <strong>Upstream data is stale.</strong> {{.FeedHealth.Reason}}
+  This list may be incomplete or out of date.
+</div>
 {{end}}
-</tbody>
-</table>
+
+{{if not .Results}}
+<div class="card"><p style="margin:0">Nothing matched that search.</p></div>
+{{else}}
+<div class="list">
+{{range .Results}}
+  <div class="node">
+    <div class="node-main">
+      <div class="node-title">
+        {{if .Name}}{{.Name}}{{else}}<span class="small">(unnamed)</span>{{end}}
+        {{if eq .Kind "observer"}}<span class="tag observer">observer</span>
+        {{else}}<span class="tag">{{if .Role}}{{.Role}}{{else}}node{{end}}</span>{{end}}
+      </div>
+      <div class="node-meta">
+        <span class="pill {{freshClass .LastSeen $.Now}}"><span class="dot"></span>seen {{since .LastSeen $.Now}}</span>
+        <span class="small">{{stamp .LastSeen}}</span>
+      </div>
+      <div class="node-key mono" title="{{.Key}}">{{shortKey .Key}}</div>
+    </div>
+
+    <div class="node-actions">
+      <form method="post" action="/watches" style="margin:0">
+        <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
+        <input type="hidden" name="kind" value="{{.Kind}}">
+        <input type="hidden" name="key" value="{{.Key}}">
+        <div class="row" style="justify-content:flex-end">
+          <label class="field">
+            Tell me after
+            <input type="number" name="threshold_hours" min="1" max="720" value="6"
+                   aria-label="Hours of silence before you are alerted">
+            hours of silence
+          </label>
+          <button type="submit">Watch</button>
+        </div>
+        {{/* Only a repeater can stop relaying. An observer reports what it
+             hears rather than forwarding, and a companion never relays at
+             all — offering this there would be a control that can never do
+             anything. */}}
+        {{if canRelay .Kind .Role}}
+        <label class="relay-opt" style="margin-top:.5rem">
+          <input type="checkbox" name="alert_on_relay">
+          <span><b>Also tell me if it stops passing traffic.</b>
+          A repeater can still be heard — powered on, sending its adverts —
+          while no longer forwarding anyone else's packets.</span>
+        </label>
+        {{end}}
+      </form>
+    </div>
+  </div>
+{{end}}
 </div>
 {{end}}
 {{end}}
