@@ -1,0 +1,10 @@
+.git
+config.yaml
+data
+*.db
+*.db-wal
+*.db-shm
+/hopreact
+*.md
+.github
+.claude

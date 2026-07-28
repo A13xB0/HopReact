@@ -1,0 +1,86 @@
+# HopReact configuration reference.
+#
+# Copy to config.yaml and edit. Every value shown here is the built-in
+# default (see internal/config.Default), so you only need to keep the keys
+# you actually change — anything you leave out keeps the default rather
+# than becoming empty.
+#
+# The path to this file is the ONE thing configured outside it:
+#   -config <path>   →   $HOPREACT_CONFIG   →   ./config.yaml
+
+# Where the SQLite database lives. The directory must be writable: SQLite
+# puts its -wal and -shm sidecar files next to the database. Must be a real
+# local filesystem — never NFS/SMB, where file locking is unreliable.
+data_dir: ./data
+
+site:
+  # Public base URL, used to build the OAuth redirect URI and the links in
+  # Discord messages. Must match the redirect URI registered in the Discord
+  # developer portal exactly.
+  base_url: http://localhost:8080
+  name: HopReact
+  # Shown in the footer and linked from every alert. Point this at the
+  # privacy policy on your main site.
+  privacy_policy_url: ""
+
+http:
+  listen: ":8080"
+
+corescope:
+  # The CoreScope instance to watch. Public and unauthenticated — the same
+  # instance HopReach reads.
+  api_url: https://scotmesh-corescope.mm7roq.compute.oarc.uk
+  request_timeout_seconds: 30
+
+discord:
+  # From the Discord developer portal (Applications → your app).
+  client_id: ""
+  client_secret: ""
+  # Bot token. This is what actually sends the DMs, so it is the one
+  # credential that must outlive a user's session.
+  bot_token: ""
+  # The guild the bot lives in. Sign-in adds the user here (OAuth scope
+  # guilds.join) so the bot shares a server with them — without that,
+  # Discord will not let a bot DM a user at all.
+  guild_id: ""
+  # Discord user ID to notify about HopReact itself: failed polls, and the
+  # blast-radius breaker tripping. Left empty, those only go to the log.
+  operator_user_id: ""
+
+poll:
+  # How often to poll CoreScope. Two cheap GETs, so this is mostly about
+  # how quickly an outage is noticed — with a one-hour minimum threshold
+  # there is nothing to gain below a minute or two, and hammering someone
+  # else's public API to no purpose is rude. Floored at 1m by Validate.
+  interval: 5m
+
+  # --- safety rails: see internal/alert -----------------------------------
+  # These exist so a CoreScope outage can never be mistaken for "the whole
+  # mesh went offline" and fan out to every user at once.
+
+  # A poll returning fewer nodes than this is treated as broken rather than
+  # believed. The real feed carries hundreds; a handful means truncation or
+  # an error page that happened to parse.
+  min_nodes: 100
+  # ...and likewise if it drops below this fraction of the largest recent
+  # poll, which catches partial responses that still clear min_nodes.
+  min_node_fraction: 0.5
+  # A feed can return a plausible-looking full node list that is frozen
+  # (CoreScope's own upstream died). If no node's last_seen advances for
+  # this many consecutive polls, treat the data as stale and don't evaluate
+  # — the mesh going completely silent looks identical, and being wrong in
+  # that direction is far cheaper than alerting everyone.
+  max_polls_without_advance: 2
+
+alerts:
+  # A watch must stay over its threshold for this many consecutive polls
+  # before it alerts. Stops a node hovering right on the boundary from
+  # emitting a stream of down/up messages.
+  confirm_polls: 2
+  # Ceiling on how many watches may enter the alerting state in a single
+  # poll before the breaker trips, freezes the state machine and notifies
+  # only the operator. Whichever of the two limits is hit first wins.
+  max_new_alerts_per_poll: 10
+  max_new_alert_fraction: 0.25
+  # How many watches one account may hold.
+  max_watches_per_user: 50

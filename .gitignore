@@ -1,0 +1,14 @@
+# The instance's own config and its SQLite database — both are deployment
+# state, not source. config.example.yaml is the committed reference.
+config.yaml
+data/
+*.db
+*.db-wal
+*.db-shm
+
+# Stray build artifacts from running `go build` at the repo root rather
+# than letting the Docker build produce them.
+/hopreact
+
+# Claude Code's own local session/tooling state — not project source.
+.claude/

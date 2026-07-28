@@ -1,0 +1,20 @@
+services:
+  hopreact:
+    build: .
+    image: hopreact:latest
+    restart: unless-stopped
+    ports:
+      - "${HTTP_PORT:-8080}:8080"
+    volumes:
+      # The SQLite database. Must be a real local volume — SQLite's locking
+      # is unreliable on NFS/SMB.
+      - hopreact-data:/data
+      # Your instance's config. Copy config.example.yaml to config.yaml
+      # first; without this mount the image's built-in defaults are used,
+      # which have no Discord credentials and so cannot send anything.
+      - ./config.yaml:/config/config.yaml:ro
+    environment:
+      HOPREACT_CONFIG: /config/config.yaml
+
+volumes:
+  hopreact-data:
