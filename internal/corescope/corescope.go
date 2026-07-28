@@ -45,6 +45,14 @@ const pageLimit = 500
 // full page forever can't spin here indefinitely.
 const maxPages = 100
 
+// defaultPacketLimit is how many packets one poll reads. The live mesh runs
+// about 5 packets a minute, so this covers roughly two hours — ample overlap
+// for a five-minute poll, and enough that a few missed polls lose nothing.
+const defaultPacketLimit = 600
+
+// maxPacketLimit matches CoreScope's own ceiling on ?limit.
+const maxPacketLimit = 10000
+
 // Observation is one watchable thing at one moment, normalised from either
 // endpoint.
 //
@@ -229,6 +237,151 @@ func (c *Client) FetchObservers(ctx context.Context) ([]Observation, error) {
 			Lat:      o.Lat,
 			Lon:      o.Lon,
 		})
+	}
+	return out, nil
+}
+
+// ---------------------------------------------------------------- packets --
+
+// Payload types, from MeshCore's firmware (Packet.h) via CoreScope's decoder.
+// CoreScope emits payload_type as a bare integer on packet objects and never
+// as a name, so the mapping has to live here.
+const (
+	TypeREQ       = 0
+	TypeRESPONSE  = 1
+	TypeTXTMsg    = 2
+	TypeACK       = 3
+	TypeADVERT    = 4
+	TypeGRPTXT    = 5
+	TypeGRPData   = 6
+	TypeANONReq   = 7
+	TypePATH      = 8
+	TypeTRACE     = 9
+	TypeMULTIPART = 10
+	TypeCONTROL   = 11
+	TypeRAWCustom = 15
+)
+
+// TypeName renders a payload type for display. Unknown values keep their
+// number rather than being hidden — 12, 13 and 14 are unused today but a
+// firmware release could claim them.
+func TypeName(t int) string {
+	switch t {
+	case TypeREQ:
+		return "REQ"
+	case TypeRESPONSE:
+		return "RESPONSE"
+	case TypeTXTMsg:
+		return "TXT_MSG"
+	case TypeACK:
+		return "ACK"
+	case TypeADVERT:
+		return "ADVERT"
+	case TypeGRPTXT:
+		return "GRP_TXT"
+	case TypeGRPData:
+		return "GRP_DATA"
+	case TypeANONReq:
+		return "ANON_REQ"
+	case TypePATH:
+		return "PATH"
+	case TypeTRACE:
+		return "TRACE"
+	case TypeMULTIPART:
+		return "MULTIPART"
+	case TypeCONTROL:
+		return "CONTROL"
+	case TypeRAWCustom:
+		return "RAW_CUSTOM"
+	}
+	return fmt.Sprintf("TYPE_%d", t)
+}
+
+// AllTypes is every payload type HopReact knows, in wire order.
+var AllTypes = []int{
+	TypeREQ, TypeRESPONSE, TypeTXTMsg, TypeACK, TypeADVERT, TypeGRPTXT,
+	TypeGRPData, TypeANONReq, TypePATH, TypeTRACE, TypeMULTIPART,
+	TypeCONTROL, TypeRAWCustom,
+}
+
+// Packet is one transmission, reduced to what attribution needs.
+type Packet struct {
+	ID          int64
+	At          time.Time
+	PayloadType int
+	// PathHops are the route's hop hashes, lowercased, exactly as they
+	// appeared on the wire. Width varies between packets (it is declared once
+	// per packet by whoever originated it) and the attributor discards
+	// anything under three bytes.
+	PathHops []string
+	// AdvertPubKey is the originator's full public key, lowercased. Only
+	// ADVERTs carry one: every other payload type is encrypted and identifies
+	// its sender with a single byte, which on this mesh is ~3 candidates.
+	AdvertPubKey string
+}
+
+type packetJSON struct {
+	ID          int64    `json:"id"`
+	FirstSeen   *string  `json:"first_seen"`
+	Timestamp   *string  `json:"timestamp"`
+	PayloadType *int     `json:"payload_type"`
+	ParsedPath  []string `json:"_parsedPath"`
+	DecodedJSON string   `json:"decoded_json"`
+}
+
+type packetsResponse struct {
+	Packets []packetJSON `json:"packets"`
+	Total   int          `json:"total"`
+}
+
+// decodedAdvert is the sliver of decoded_json that matters. Note pubKey sits
+// at the top level of that document, not under a "payload" object.
+type decodedAdvert struct {
+	PubKey string `json:"pubKey"`
+}
+
+// FetchPackets returns the most recent packets, newest first.
+//
+// Deliberately unfiltered. CoreScope does accept ?node= and ?type=, but both
+// defeat its in-memory fast path and force a full store scan and sort on
+// every request, and ?node= means different things depending on whether the
+// request is served from memory (originated-or-relayed-or-addressed-to) or
+// falls back to SQL (ADVERT originator only). One unfiltered page avoids that
+// ambiguity entirely, and costs the same regardless of how many nodes are
+// being watched.
+func (c *Client) FetchPackets(ctx context.Context, limit int) ([]Packet, error) {
+	if limit <= 0 {
+		limit = defaultPacketLimit
+	}
+	if limit > maxPacketLimit {
+		limit = maxPacketLimit
+	}
+	u := fmt.Sprintf("%s/api/packets?limit=%d", c.BaseURL, limit)
+	var resp packetsResponse
+	if err := c.getJSON(ctx, u, &resp); err != nil {
+		return nil, err
+	}
+
+	out := make([]Packet, 0, len(resp.Packets))
+	for _, p := range resp.Packets {
+		if p.PayloadType == nil {
+			continue // nothing to attribute a type to
+		}
+		pk := Packet{ID: p.ID, PayloadType: *p.PayloadType, At: firstTime(p.FirstSeen, p.Timestamp)}
+		for _, h := range p.ParsedPath {
+			// CoreScope emits these uppercase; every comparison downstream is
+			// against lowercased public keys.
+			if h = strings.ToLower(strings.TrimSpace(h)); h != "" {
+				pk.PathHops = append(pk.PathHops, h)
+			}
+		}
+		if pk.PayloadType == TypeADVERT && p.DecodedJSON != "" {
+			var d decodedAdvert
+			if json.Unmarshal([]byte(p.DecodedJSON), &d) == nil {
+				pk.AdvertPubKey = strings.ToLower(strings.TrimSpace(d.PubKey))
+			}
+		}
+		out = append(out, pk)
 	}
 	return out, nil
 }
