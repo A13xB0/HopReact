@@ -1,6 +1,8 @@
-# HopReact
+<p align="center">
+  <img src="docs/hopreact_logo_square.png" alt="HopReact — know when your MeshCore repeater goes quiet" width="360">
+</p>
 
-**Know when your MeshCore repeater goes quiet.**
+# HopReact
 
 Sign in with Discord, mark which repeaters and observers are yours, choose how
 many hours of silence means trouble, and HopReact's bot sends you a direct
