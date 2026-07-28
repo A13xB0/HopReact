@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/hopreact_logo_square.png" alt="HopReact — know when your MeshCore repeater goes quiet" width="360">
+  <img src="docs/hopreact_banner_logo.png" alt="HopReact — know when your MeshCore repeater goes quiet" width="640">
 </p>
 
 # HopReact
