@@ -220,6 +220,16 @@ func runHousekeeping(ctx context.Context, st *store.Store, log *slog.Logger) {
 			} else if n > 0 {
 				log.Info("pruned expired sessions", "count", n)
 			}
+			// poll_runs, delivered notifications and alert_events are the only
+			// tables that grow with time rather than with the size of the
+			// mesh — a poll every five minutes is ~105,000 rows a year on its
+			// own. Everything else is one row per node, or per node and
+			// payload type; no packet is ever stored.
+			if n, err := st.Prune(ctx); err != nil {
+				log.Error("pruning history", "err", err)
+			} else if n > 0 {
+				log.Info("pruned old history", "rows", n)
+			}
 		}
 	}
 }

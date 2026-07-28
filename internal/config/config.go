@@ -119,6 +119,12 @@ type PollConfig struct {
 	// couple of hours — enough overlap that a few missed polls lose nothing,
 	// and one request regardless of how many nodes are being watched.
 	PacketLimit int `yaml:"packet_limit"`
+
+	// BackfillHours is how much history to read once, on first run, so the
+	// per-type view has something to show immediately rather than reading
+	// "never" against everything for its first day. CoreScope does the
+	// windowing, so this costs a single request. 0 disables it.
+	BackfillHours int `yaml:"backfill_hours"`
 }
 
 type AlertsConfig struct {
@@ -158,6 +164,7 @@ func Default() Config {
 			MinNodeFraction:        0.5,
 			MaxPollsWithoutAdvance: 2,
 			PacketLimit:            600,
+			BackfillHours:          24,
 		},
 		Alerts: AlertsConfig{
 			ConfirmPolls:        2,
@@ -258,6 +265,9 @@ func (c Config) Validate() error {
 	}
 	if c.Poll.PacketLimit < 0 || c.Poll.PacketLimit > 10000 {
 		return fmt.Errorf("poll.packet_limit must be between 0 and 10000, got %d", c.Poll.PacketLimit)
+	}
+	if c.Poll.BackfillHours < 0 || c.Poll.BackfillHours > 168 {
+		return fmt.Errorf("poll.backfill_hours must be between 0 and 168, got %d", c.Poll.BackfillHours)
 	}
 	if c.Alerts.ConfirmPolls < 1 {
 		return fmt.Errorf("alerts.confirm_polls must be at least 1, got %d", c.Alerts.ConfirmPolls)

@@ -19,6 +19,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -329,11 +330,6 @@ type packetJSON struct {
 	DecodedJSON string   `json:"decoded_json"`
 }
 
-type packetsResponse struct {
-	Packets []packetJSON `json:"packets"`
-	Total   int          `json:"total"`
-}
-
 // decodedAdvert is the sliver of decoded_json that matters. Note pubKey sits
 // at the top level of that document, not under a "payload" object.
 type decodedAdvert struct {
@@ -350,6 +346,22 @@ type decodedAdvert struct {
 // ambiguity entirely, and costs the same regardless of how many nodes are
 // being watched.
 func (c *Client) FetchPackets(ctx context.Context, limit int) ([]Packet, error) {
+	return c.fetchPackets(ctx, time.Time{}, limit)
+}
+
+// FetchPacketsSince returns every packet CoreScope has recorded since a given
+// time, newest first.
+//
+// Used for the one-off backfill that gives a fresh install real history to
+// show, instead of a table reading "never" against every payload type until a
+// day's traffic has trickled through. CoreScope does the windowing, so this
+// costs one request: 24 hours of the live mesh is about 4,600 packets and
+// under five megabytes.
+func (c *Client) FetchPacketsSince(ctx context.Context, since time.Time, limit int) ([]Packet, error) {
+	return c.fetchPackets(ctx, since, limit)
+}
+
+func (c *Client) fetchPackets(ctx context.Context, since time.Time, limit int) ([]Packet, error) {
 	if limit <= 0 {
 		limit = defaultPacketLimit
 	}
@@ -357,13 +369,62 @@ func (c *Client) FetchPackets(ctx context.Context, limit int) ([]Packet, error) 
 		limit = maxPacketLimit
 	}
 	u := fmt.Sprintf("%s/api/packets?limit=%d", c.BaseURL, limit)
-	var resp packetsResponse
-	if err := c.getJSON(ctx, u, &resp); err != nil {
-		return nil, err
+	if !since.IsZero() {
+		u += "&since=" + url.QueryEscape(since.UTC().Format(time.RFC3339))
 	}
 
-	out := make([]Packet, 0, len(resp.Packets))
-	for _, p := range resp.Packets {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return nil, fmt.Errorf("corescope: building request: %w", err)
+	}
+	req.Header.Set("Accept", "application/json")
+	resp, err := c.HTTP.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("corescope: GET %s: %w", u, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("corescope: GET %s: status %d", u, resp.StatusCode)
+	}
+
+	// Decoded element by element rather than into one big struct. A backfill
+	// page is several megabytes of JSON, most of it decoded_json and raw_hex
+	// that we throw away immediately; materialising all of it at once would
+	// cost several times the reduced form, and this runs in a 256MB container.
+	return decodePacketStream(resp.Body)
+}
+
+func decodePacketStream(r io.Reader) ([]Packet, error) {
+	dec := json.NewDecoder(r)
+
+	// Walk to the value of the "packets" key.
+	for {
+		tok, err := dec.Token()
+		if err == io.EOF {
+			return nil, nil // no packets key at all; nothing to do
+		}
+		if err != nil {
+			return nil, fmt.Errorf("corescope: decoding packets: %w", err)
+		}
+		if k, ok := tok.(string); ok && k == "packets" {
+			break
+		}
+	}
+	// Opening bracket of the array, or null.
+	tok, err := dec.Token()
+	if err != nil {
+		return nil, fmt.Errorf("corescope: decoding packets: %w", err)
+	}
+	if d, ok := tok.(json.Delim); !ok || d != '[' {
+		return nil, nil
+	}
+
+	var out []Packet
+	for dec.More() {
+		var p packetJSON
+		if err := dec.Decode(&p); err != nil {
+			return nil, fmt.Errorf("corescope: decoding a packet: %w", err)
+		}
 		if p.PayloadType == nil {
 			continue // nothing to attribute a type to
 		}

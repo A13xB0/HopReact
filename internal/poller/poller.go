@@ -32,6 +32,11 @@ import (
 	"hopreact/internal/store"
 )
 
+// maxBackfillPackets caps the one-off history read. CoreScope's own ceiling
+// is 10,000, and 24 hours of the live mesh is about 4,600 — so this is
+// headroom for a busier mesh, not a target.
+const maxBackfillPackets = 10000
+
 // Poller owns one polling loop.
 type Poller struct {
 	Store *store.Store
@@ -191,9 +196,24 @@ func (p *Poller) ingest(ctx context.Context, snap corescope.Snapshot) (int, erro
 		return 0, err
 	}
 
-	fetchCtx, cancel := context.WithTimeout(ctx, p.Cfg.RequestTimeout())
+	// The first run reads a window of history rather than just the newest
+	// page, so the per-type table has something to show immediately instead
+	// of reading "never" against everything for the first day — and so rules
+	// have evidence to judge, since a rule with none deliberately cannot
+	// fire. CoreScope does the windowing given ?since=, so this is still one
+	// request: 24 hours is about 4,600 packets on the live mesh.
+	backfilling := cursor.BackfilledAt.IsZero() && p.Cfg.Poll.BackfillHours > 0
+
+	fetchCtx, cancel := context.WithTimeout(ctx, p.Cfg.RequestTimeout()*3)
 	defer cancel()
-	packets, err := p.Scope.FetchPackets(fetchCtx, p.Cfg.Poll.PacketLimit)
+
+	var packets []corescope.Packet
+	if backfilling {
+		since := p.now().Add(-time.Duration(p.Cfg.Poll.BackfillHours) * time.Hour)
+		packets, err = p.Scope.FetchPacketsSince(fetchCtx, since, maxBackfillPackets)
+	} else {
+		packets, err = p.Scope.FetchPackets(fetchCtx, p.Cfg.Poll.PacketLimit)
+	}
 	if err != nil {
 		return 0, err
 	}
@@ -214,13 +234,25 @@ func (p *Poller) ingest(ctx context.Context, snap corescope.Snapshot) (int, erro
 	}
 	rows := map[slot]*agg{}
 
-	var highest int64
+	// [low, high] is the INCLUSIVE id range already counted — both ends are
+	// packets we have seen, not boundaries beyond them. A packet is new only
+	// if it falls outside that range at either end: newer than anything seen,
+	// or older than anything seen. That is what lets the backfill add history
+	// without counting the overlap with what has already been read twice.
+	low, high := cursor.Low, cursor.High
 	fresh := 0
 	for _, pk := range packets {
-		if pk.ID > highest {
-			highest = pk.ID
+		if pk.At.IsZero() {
+			continue
 		}
-		if pk.ID <= cursor || pk.At.IsZero() {
+		seenBefore := cursor.High > 0 && pk.ID <= cursor.High && pk.ID >= cursor.Low
+		if pk.ID > high {
+			high = pk.ID
+		}
+		if low == 0 || pk.ID < low {
+			low = pk.ID
+		}
+		if seenBefore {
 			continue
 		}
 		fresh++
@@ -238,7 +270,7 @@ func (p *Poller) ingest(ctx context.Context, snap corescope.Snapshot) (int, erro
 		}
 	}
 
-	if len(rows) == 0 && highest <= cursor {
+	if len(rows) == 0 && !backfilling && high <= cursor.High {
 		return 0, nil
 	}
 
@@ -249,11 +281,15 @@ func (p *Poller) ingest(ctx context.Context, snap corescope.Snapshot) (int, erro
 				return err
 			}
 		}
-		// Advancing the cursor in the same transaction as the evidence is
-		// what makes a crash safe: either both land or neither does, so a
-		// packet is never marked consumed without its evidence.
-		return p.Store.SetFeedCursor(ctx, tx, highest)
+		// Widening the cursor in the same transaction as the evidence is what
+		// makes a crash safe: either both land or neither does, so a packet is
+		// never marked consumed without its evidence.
+		return p.Store.SetFeedCursor(ctx, tx, low, high, backfilling)
 	})
+	if err == nil && backfilling {
+		p.Log.Info("backfilled per-type history", "hours", p.Cfg.Poll.BackfillHours,
+			"packets", len(packets), "recorded", fresh, "nodes_indexed", idx.Len())
+	}
 	return fresh, err
 }
 

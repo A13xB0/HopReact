@@ -28,7 +28,11 @@ type fakeScope struct {
 	packets      []map[string]any
 	packetStatus int
 	packetHits   int
-	srv          *httptest.Server
+	// lastSince records the ?since= the client asked for, so a test can tell
+	// a windowed backfill from an ordinary newest-page read.
+	lastSince     string
+	sinceRequests int
+	srv           *httptest.Server
 }
 
 func newFakeScope(t *testing.T) *fakeScope {
@@ -37,6 +41,10 @@ func newFakeScope(t *testing.T) *fakeScope {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/packets", func(w http.ResponseWriter, r *http.Request) {
 		f.packetHits++
+		if v := r.URL.Query().Get("since"); v != "" {
+			f.lastSince = v
+			f.sinceRequests++
+		}
 		if f.packetStatus != http.StatusOK {
 			http.Error(w, "no packets for you", f.packetStatus)
 			return
@@ -579,5 +587,71 @@ func TestPacketFeedFailureDoesNotFailThePoll(t *testing.T) {
 	}
 	if h.scope.packetHits == 0 {
 		t.Error("the packet feed should have been attempted")
+	}
+}
+
+// The first run reads a window of history, not just the newest page, so the
+// per-type table has something to show immediately instead of reading "never"
+// against everything for a day — and so rules have evidence to judge, since a
+// rule with none deliberately cannot fire.
+func TestFirstPollBackfillsHistory(t *testing.T) {
+	h := newHarness(t, nil)
+	h.scope.setNodes(h.now, 200, time.Minute)
+	// Traffic from well before the service ever started.
+	h.scope.packets = []map[string]any{
+		advertPacket(10, 0, h.now.Add(-20*time.Hour)),
+		carriedPacket(11, corescope.TypeGRPTXT, 0, h.now.Add(-18*time.Hour)),
+	}
+	h.watch(t, key(0), 6)
+	h.poll(t)
+
+	acts, err := h.st.ActivityFor(context.Background(), "node", key(0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(acts) == 0 {
+		t.Fatal("the first poll recorded no history at all")
+	}
+	var sawOld bool
+	for _, a := range acts {
+		if a.LastAt.Before(t0.Add(-10 * time.Hour)) {
+			sawOld = true
+		}
+	}
+	if !sawOld {
+		t.Errorf("backfill should reach hours back, got %+v", acts)
+	}
+	if h.scope.lastSince == "" {
+		t.Error("the backfill should ask CoreScope for a window with ?since=, not page blindly")
+	}
+}
+
+// The backfill runs once. Re-running it on every poll would re-count the same
+// packets forever and hammer the upstream for several megabytes each time.
+func TestBackfillOnlyRunsOnce(t *testing.T) {
+	h := newHarness(t, nil)
+	h.scope.setNodes(h.now, 200, time.Minute)
+	h.scope.packets = []map[string]any{advertPacket(10, 0, h.now.Add(-20*time.Hour))}
+	h.watch(t, key(0), 6)
+	h.poll(t)
+
+	first := h.scope.sinceRequests
+	if first != 1 {
+		t.Fatalf("backfill requests after first poll = %d, want 1", first)
+	}
+	for i := 1; i <= 3; i++ {
+		h.now = t0.Add(time.Duration(i) * 5 * time.Minute)
+		h.scope.setNodes(h.now, 200, time.Minute)
+		h.poll(t)
+	}
+	if h.scope.sinceRequests != 1 {
+		t.Errorf("backfill ran %d times, want exactly 1", h.scope.sinceRequests)
+	}
+
+	acts, _ := h.st.ActivityFor(context.Background(), "node", key(0))
+	for _, a := range acts {
+		if a.EvidenceCount != 1 {
+			t.Errorf("evidence count = %d after repeated polls, want 1", a.EvidenceCount)
+		}
 	}
 }

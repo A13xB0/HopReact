@@ -687,3 +687,103 @@ func TestMigratedSchemaMatchesFresh(t *testing.T) {
 		}
 	}
 }
+
+// ------------------------------------------------------------- retention --
+
+// Almost everything here is bounded by the size of the mesh: one row per
+// target, and one per target per payload type per direction. No packet is
+// ever stored — only the timestamp of the most recent one of each kind. These
+// three tables are the exception, growing with time instead, and a poll every
+// five minutes is about 105,000 poll_runs a year on its own.
+func TestPruneDropsOnlyOldHistory(t *testing.T) {
+	s, now := testStore(t)
+	ctx := context.Background()
+	u, _ := s.UpsertUser(ctx, "d1", "alice", "")
+
+	old := base.Add(-400 * 24 * time.Hour).Unix()
+	recent := base.Add(-time.Hour).Unix()
+
+	err := s.tx(ctx, func(tx *sql.Tx) error {
+		for _, at := range []int64{old, recent} {
+			if _, err := tx.ExecContext(ctx,
+				`INSERT INTO poll_runs (started_at, status) VALUES (?, 'ok')`, at); err != nil {
+				return err
+			}
+			if _, err := tx.ExecContext(ctx,
+				`INSERT INTO alert_events (watch_id, rule_id, signal, from_state, to_state, at, notified)
+				 VALUES (1, 1, 'x', 'ok', 'alerting', ?, 1)`, at); err != nil {
+				return err
+			}
+			// One delivered and one still queued at each age.
+			if _, err := tx.ExecContext(ctx,
+				`INSERT INTO notifications (user_id, kind, payload, created_at, send_after, sent_at)
+				 VALUES (?, 'alert', '{}', ?, ?, ?)`, u.ID, at, at, at); err != nil {
+				return err
+			}
+			if _, err := tx.ExecContext(ctx,
+				`INSERT INTO notifications (user_id, kind, payload, created_at, send_after, sent_at)
+				 VALUES (?, 'alert', '{}', ?, ?, NULL)`, u.ID, at, at); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	*now = base
+	if _, err := s.Prune(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	if n := countRows(t, s, "poll_runs"); n != 1 {
+		t.Errorf("poll_runs = %d, want 1 (the recent one)", n)
+	}
+	if n := countRows(t, s, "alert_events"); n != 1 {
+		t.Errorf("alert_events = %d, want 1", n)
+	}
+	// An undelivered message is never pruned by age — dropping one silently
+	// would lose an alert somebody is still owed.
+	var unsent int
+	if err := s.read.QueryRow(`SELECT COUNT(*) FROM notifications WHERE sent_at IS NULL`).Scan(&unsent); err != nil {
+		t.Fatal(err)
+	}
+	if unsent != 2 {
+		t.Errorf("unsent notifications = %d, want both kept regardless of age", unsent)
+	}
+	var sent int
+	if err := s.read.QueryRow(`SELECT COUNT(*) FROM notifications WHERE sent_at IS NOT NULL`).Scan(&sent); err != nil {
+		t.Fatal(err)
+	}
+	if sent != 1 {
+		t.Errorf("delivered notifications = %d, want only the recent one", sent)
+	}
+}
+
+// The activity table must stay one row per (target, type, direction) no
+// matter how much traffic flows through — it records the latest time each
+// kind of packet was seen, not the packets themselves.
+func TestActivityDoesNotGrowWithTraffic(t *testing.T) {
+	s, _ := testStore(t)
+	ctx := context.Background()
+	for i := 0; i < 500; i++ {
+		err := s.tx(ctx, func(tx *sql.Tx) error {
+			return s.UpsertActivity(ctx, tx, "node", "aa", 4, DirCarried,
+				base.Add(time.Duration(i)*time.Minute), 1)
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if n := countRows(t, s, "target_activity"); n != 1 {
+		t.Fatalf("500 packets produced %d rows, want 1", n)
+	}
+	acts, _ := s.ActivityFor(ctx, "node", "aa")
+	if len(acts) != 1 || acts[0].EvidenceCount != 500 {
+		t.Fatalf("got %+v, want one row counting 500", acts)
+	}
+	if !acts[0].LastAt.Equal(base.Add(499 * time.Minute)) {
+		t.Errorf("LastAt = %v, want the newest", acts[0].LastAt)
+	}
+}

@@ -766,25 +766,53 @@ func (s *Store) AllActivity(ctx context.Context) (map[string][]Activity, error) 
 	return out, rows.Err()
 }
 
-// FeedCursor is the highest packet id already ingested.
-func (s *Store) FeedCursor(ctx context.Context) (int64, error) {
-	var id int64
-	err := s.read.QueryRowContext(ctx, `SELECT last_packet_id FROM feed_cursor WHERE id = 1`).Scan(&id)
-	if errors.Is(err, sql.ErrNoRows) {
-		return 0, nil
-	}
-	return id, err
+// Cursor is how far through the packet feed we have read. Low and High are
+// the half-open range of packet ids already counted, which lets the backfill
+// ingest strictly older packets without double-counting the overlap.
+type Cursor struct {
+	Low, High    int64
+	BackfilledAt time.Time
 }
 
-// SetFeedCursor advances the high-water mark inside the caller's transaction,
-// so evidence and the cursor that says it was consumed commit together.
-func (s *Store) SetFeedCursor(ctx context.Context, tx *sql.Tx, id int64) error {
+// FeedCursor returns the ingest cursor.
+func (s *Store) FeedCursor(ctx context.Context) (Cursor, error) {
+	var c Cursor
+	var backfilled int64
+	err := s.read.QueryRowContext(ctx,
+		`SELECT low_packet_id, last_packet_id, backfilled_at FROM feed_cursor WHERE id = 1`).
+		Scan(&c.Low, &c.High, &backfilled)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Cursor{}, nil
+	}
+	if backfilled > 0 {
+		c.BackfilledAt = time.Unix(backfilled, 0).UTC()
+	}
+	return c, err
+}
+
+// SetFeedCursor widens the consumed range inside the caller's transaction, so
+// evidence and the cursor that says it was consumed commit together.
+//
+// High only ever moves forward and Low only ever moves back — the range of
+// what has been counted can grow at either end but never shrink, so a
+// re-served page can't be counted twice.
+func (s *Store) SetFeedCursor(ctx context.Context, tx *sql.Tx, low, high int64, backfilled bool) error {
+	var backfilledAt any = 0
+	if backfilled {
+		backfilledAt = s.Now().UTC().Unix()
+	}
 	_, err := tx.ExecContext(ctx, `
-		INSERT INTO feed_cursor (id, last_packet_id, updated_at) VALUES (1, ?, ?)
+		INSERT INTO feed_cursor (id, low_packet_id, last_packet_id, updated_at, backfilled_at)
+		VALUES (1, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
+			low_packet_id = CASE
+				WHEN low_packet_id = 0 THEN excluded.low_packet_id
+				WHEN excluded.low_packet_id = 0 THEN low_packet_id
+				ELSE MIN(low_packet_id, excluded.low_packet_id) END,
 			last_packet_id = MAX(last_packet_id, excluded.last_packet_id),
-			updated_at = excluded.updated_at`,
-		id, s.Now().UTC().Unix())
+			updated_at = excluded.updated_at,
+			backfilled_at = MAX(backfilled_at, excluded.backfilled_at)`,
+		low, high, s.Now().UTC().Unix(), backfilledAt)
 	return err
 }
 
@@ -978,6 +1006,66 @@ func (s *Store) RecentPollRuns(ctx context.Context, limit int) ([]PollRun, error
 		out = append(out, r)
 	}
 	return out, rows.Err()
+}
+
+// Retention windows for the three tables that grow with time rather than with
+// the size of the mesh.
+//
+// Everything else here is naturally bounded: targets and target_activity have
+// one row per node (and per payload type), so they stop growing when the mesh
+// does. No packet is ever stored — only the timestamp of the most recent one
+// of each kind. These three are the exceptions, and a poll every five minutes
+// is about 105,000 poll_runs a year if nothing removes them.
+const (
+	// pollRunRetention outlives every window that reads this table:
+	// MaxRecentNodeCount looks back 7 days, ConsecutiveNonAdvancingPolls 20
+	// rows. A month leaves plenty of room to look into "why didn't I get an
+	// alert last week".
+	pollRunRetention = 30 * 24 * time.Hour
+	// notificationRetention applies only to messages already delivered or
+	// abandoned. Anything still queued is kept regardless of age.
+	notificationRetention = 90 * 24 * time.Hour
+	// alertEventRetention is the "you never told me" audit trail. It only
+	// gains a row on an actual state change, so a year of it is small.
+	alertEventRetention = 365 * 24 * time.Hour
+)
+
+// Prune drops history past its retention window. Returns how many rows went.
+func (s *Store) Prune(ctx context.Context) (int64, error) {
+	now := s.Now().UTC()
+	var total int64
+	err := s.tx(ctx, func(tx *sql.Tx) error {
+		for _, q := range []struct {
+			stmt   string
+			cutoff time.Time
+		}{
+			{`DELETE FROM poll_runs WHERE started_at < ?`, now.Add(-pollRunRetention)},
+			{`DELETE FROM notifications WHERE sent_at IS NOT NULL AND sent_at < ?`, now.Add(-notificationRetention)},
+			{`DELETE FROM alert_events WHERE at < ?`, now.Add(-alertEventRetention)},
+		} {
+			res, err := tx.ExecContext(ctx, q.stmt, q.cutoff.Unix())
+			if err != nil {
+				return err
+			}
+			n, _ := res.RowsAffected()
+			total += n
+		}
+		return nil
+	})
+	return total, err
+}
+
+// LastOKPollAt is when the feed was last read successfully, or zero if it
+// never has been. Asked directly rather than scanned out of a page of recent
+// runs, so a long outage cannot make a healthy history look like "never".
+func (s *Store) LastOKPollAt(ctx context.Context) (time.Time, error) {
+	var at sql.NullInt64
+	err := s.read.QueryRowContext(ctx,
+		`SELECT MAX(started_at) FROM poll_runs WHERE status = 'ok'`).Scan(&at)
+	if err != nil {
+		return time.Time{}, err
+	}
+	return timeFrom(at), nil
 }
 
 // MaxRecentNodeCount is the yardstick the "implausibly small poll" check

@@ -79,6 +79,18 @@ poll:
   # A high-water mark stops a re-read page being counted twice.
   packet_limit: 600
 
+  # How much history to read once, on the very first run, so the per-type view
+  # has something to show immediately instead of reading "never" against
+  # everything for its first day — and so rules have evidence to judge, since
+  # a rule with none deliberately stays quiet. CoreScope does the windowing,
+  # so this is a single request: 24 hours is about 4,600 packets and takes a
+  # couple of seconds. Set to 0 to skip it.
+  #
+  # Note this does not store packets. Only the time each kind of traffic was
+  # last seen per node is kept, which is at most a few thousand rows however
+  # busy the mesh gets.
+  backfill_hours: 24
+
 alerts:
   # A watch must stay over its threshold for this many consecutive polls
   # before it alerts. Stops a node hovering right on the boundary from
