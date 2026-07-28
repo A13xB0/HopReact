@@ -747,14 +747,12 @@ func (s *Store) WatchViews(ctx context.Context, userID int64) ([]WatchView, erro
 	defer rows.Close()
 
 	var views []WatchView
-	var ids []int64
 	for rows.Next() {
 		w, err := scanWatch(rows)
 		if err != nil {
 			return nil, err
 		}
 		views = append(views, WatchView{Watch: w})
-		ids = append(ids, w.ID)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err

@@ -11,6 +11,15 @@ instance — the same data behind
 [HopReach](https://github.com/A13xB0/hopreach)'s coverage map — and does
 nothing but watch it on your behalf.
 
+> ⚠️ **Vibe-coded software.** This was built with heavy AI assistance rather
+> than fully by hand. It is tested — the alerting logic in particular is
+> covered fairly thoroughly, because the failure mode is messaging real people
+> at three in the morning — and human review has been endeavoured throughout,
+> but it has not had independent code review from someone who wasn't also
+> steering the AI. Read the source yourself before relying on it for anything
+> that matters, and treat the alerts as a helpful nudge rather than a
+> guarantee.
+
 ## Why
 
 On a real mesh, a dead repeater is easy to miss. On the network this was
