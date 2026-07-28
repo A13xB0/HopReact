@@ -55,17 +55,63 @@ type Watch struct {
 	CreatedAt      time.Time
 }
 
-// Signal is which liveness question a piece of state answers.
-type Signal string
+// Source is where a rule's timestamp comes from.
+type Source string
 
 const (
-	// SignalSeen is "heard at all" — the default, and the only signal that
-	// applies to observers.
-	SignalSeen Signal = "seen"
-	// SignalRelayed is "still appearing in packet routes" — opt-in per
-	// watch.
-	SignalRelayed Signal = "relayed"
+	// SourceSeen is CoreScope's own last_seen — heard at all. The only source
+	// that applies to observers.
+	SourceSeen Source = "seen"
+	// SourceRelayed is CoreScope's own last_relayed — seen in any packet
+	// route, at whatever hop width.
+	SourceRelayed Source = "relayed"
+	// SourceTypes reads the per-type evidence HopReact attributes itself.
+	//
+	// Strictly narrower than the two above: it only counts adverts (whose
+	// sender is stated outright) and path hops at least three bytes wide,
+	// which is roughly 41% of packets. That is the price of never guessing
+	// who a hop belonged to — and the reason a rule with no evidence must
+	// stay unknown rather than being read as silence.
+	SourceTypes Source = "types"
 )
+
+// Direction is how a node was involved in a packet. Mirrors
+// attribute.Direction; duplicated here so the store does not depend on the
+// attribution package.
+type Direction string
+
+const (
+	DirSent    Direction = "sent"
+	DirCarried Direction = "carried"
+	// DirEither accepts evidence of either kind. Only valid on a rule, never
+	// on a stored activity row.
+	DirEither Direction = "either"
+)
+
+// Rule is one alerting condition on a watch. A watch may have several, and
+// they are ORed: any one going over its threshold raises the alert.
+type Rule struct {
+	ID      int64
+	WatchID int64
+	Label   string
+	Source  Source
+	// Types are payload type integers, for SourceTypes. Stored expanded
+	// rather than as a group name, so redefining a group later cannot change
+	// what an existing rule alerts on.
+	Types          []int
+	Direction      Direction
+	ThresholdHours int
+	CreatedAt      time.Time
+}
+
+// Activity is when one payload type was last observed for one target, in one
+// direction.
+type Activity struct {
+	PayloadType   int
+	Direction     Direction
+	LastAt        time.Time
+	EvidenceCount int
+}
 
 // State is a point in the alert lifecycle.
 type State string
@@ -83,10 +129,10 @@ const (
 	StateRecovering State = "recovering"
 )
 
-// WatchState is the alert state of one watch for one signal.
+// WatchState is the alert state of one watch for one rule.
 type WatchState struct {
 	WatchID       int64
-	Signal        Signal
+	RuleID        int64
 	State         State
 	Since         time.Time
 	Consecutive   int
@@ -141,11 +187,35 @@ type Notification struct {
 	LastError string
 }
 
-// WatchView is a watch joined to its target and state, which is what the
-// dashboard renders.
+// RuleView is a rule with its current alert state, for rendering.
+type RuleView struct {
+	Rule  Rule
+	State WatchState
+}
+
+// WatchView is a watch joined to its target and every rule's state, which is
+// what the dashboard renders.
 type WatchView struct {
 	Watch  Watch
 	Target *Target // nil when CoreScope has never reported this key
-	Seen   WatchState
-	Relay  *WatchState // nil unless the watch opted into the relay signal
+	Rules  []RuleView
+}
+
+// Worst returns the rule in the most serious state, which is what the summary
+// row shows. Alerting beats pending beats everything else; among equals the
+// one that has been that way longest wins.
+func (v WatchView) Worst() *RuleView {
+	rank := map[State]int{
+		StateAlerting: 4, StatePending: 3, StateRecovering: 2,
+		StateOK: 1, StateUnknown: 0,
+	}
+	var best *RuleView
+	for i := range v.Rules {
+		r := &v.Rules[i]
+		if best == nil || rank[r.State.State] > rank[best.State.State] ||
+			(rank[r.State.State] == rank[best.State.State] && r.State.Since.Before(best.State.Since)) {
+			best = r
+		}
+	}
+	return best
 }

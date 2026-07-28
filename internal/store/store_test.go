@@ -2,7 +2,10 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"errors"
+	"fmt"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -134,8 +137,7 @@ func TestNeverRelayedTargetKeepsRelayUnknown(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	states, _ := s.AllWatchState(ctx)
-	if got := states[id][SignalRelayed].State; got != StateUnknown {
+	if got := mustState(t, s, id, SourceRelayed).State; got != StateUnknown {
 		t.Errorf("relay state = %q, want %q for a target that has never relayed", got, StateUnknown)
 	}
 }
@@ -160,7 +162,7 @@ func TestCreateWatchSeedsAlreadyOfflineTargetSilently(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	st := mustState(t, s, id, SignalSeen)
+	st := mustState(t, s, id, SourceSeen)
 	if st.State != StateAlerting {
 		t.Errorf("state = %q, want %q", st.State, StateAlerting)
 	}
@@ -187,7 +189,7 @@ func TestCreateWatchOnHealthyTargetStartsOK(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if st := mustState(t, s, id, SignalSeen); st.State != StateOK {
+	if st := mustState(t, s, id, SourceSeen); st.State != StateOK {
 		t.Errorf("state = %q, want %q", st.State, StateOK)
 	}
 }
@@ -202,7 +204,7 @@ func TestWatchOnUnknownTargetStaysUnknown(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if st := mustState(t, s, id, SignalSeen); st.State != StateUnknown {
+	if st := mustState(t, s, id, SourceSeen); st.State != StateUnknown {
 		t.Errorf("state = %q, want %q", st.State, StateUnknown)
 	}
 }
@@ -464,8 +466,14 @@ func TestWatchViewsJoinsTargetAndState(t *testing.T) {
 	if views[0].Target == nil || views[0].Target.Name != "n-aa" {
 		t.Error("the known target should be joined")
 	}
-	if views[0].Relay == nil {
-		t.Error("a watch with AlertOnRelay should carry relay state")
+	var haveRelay bool
+	for _, rv := range views[0].Rules {
+		if rv.Rule.Source == SourceRelayed {
+			haveRelay = true
+		}
+	}
+	if !haveRelay {
+		t.Error("a watch with AlertOnRelay should carry a relay rule")
 	}
 	if views[1].Target != nil {
 		t.Error("an unknown target must come back nil, not zero-valued")
@@ -474,17 +482,33 @@ func TestWatchViewsJoinsTargetAndState(t *testing.T) {
 
 // ------------------------------------------------------------- helpers --
 
-func mustState(t *testing.T, s *Store, watchID int64, sig Signal) WatchState {
+// mustState returns the alert state of the watch's rule with the given
+// source. State is keyed by rule now, and a watch's rules are created for it,
+// so tests reach it through the source they mean rather than a rule id they
+// would have to look up anyway.
+func mustState(t *testing.T, s *Store, watchID int64, src Source) WatchState {
 	t.Helper()
-	states, err := s.AllWatchState(context.Background())
+	ctx := context.Background()
+	rules, err := s.RulesForWatch(ctx, watchID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	st, ok := states[watchID][sig]
-	if !ok {
-		t.Fatalf("no %s state for watch %d", sig, watchID)
+	states, err := s.AllWatchState(ctx)
+	if err != nil {
+		t.Fatal(err)
 	}
-	return st
+	for _, r := range rules {
+		if r.Source != src {
+			continue
+		}
+		st, ok := states[watchID][r.ID]
+		if !ok {
+			t.Fatalf("rule %d (%s) on watch %d has no state row", r.ID, src, watchID)
+		}
+		return st
+	}
+	t.Fatalf("watch %d has no %s rule", watchID, src)
+	return WatchState{}
 }
 
 func countRows(t *testing.T, s *Store, table string) int {
@@ -495,4 +519,171 @@ func countRows(t *testing.T, s *Store, table string) int {
 		t.Fatal(err)
 	}
 	return n
+}
+
+// ------------------------------------------------------------ migration --
+
+// openV1 builds a database at the pre-rules schema and returns its directory.
+func openV1(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	db, err := sql.Open("sqlite", "file:"+filepath.Join(dir, "hopreact.db")+
+		"?_pragma=journal_mode(WAL)&_pragma=foreign_keys(ON)&_txlock=immediate")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	body, err := migrationFS.ReadFile("migrations/0001_init.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(string(body)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`PRAGMA user_version = 1`); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+// Upgrading must not change what anyone is alerted on. Every existing watch
+// keeps CoreScope's own last_seen as its signal — NOT an equivalent built
+// from per-type evidence, which sees only about 41% of packets and would
+// quietly tighten every threshold in the system.
+func TestMigrationPreservesExistingAlerting(t *testing.T) {
+	dir := openV1(t)
+	ts := base.Add(-30 * time.Hour).Unix()
+
+	func() {
+		db, err := sql.Open("sqlite", "file:"+filepath.Join(dir, "hopreact.db")+"?_pragma=foreign_keys(ON)&_txlock=immediate")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer db.Close()
+		if _, err := db.Exec(`
+			INSERT INTO users (id, discord_id, username, created_at, last_login_at)
+				VALUES (1,'d1','alice',0,0);
+			INSERT INTO targets (kind, key, name, role, last_seen_at, last_relayed_at,
+				relay_ever_observed_at, first_indexed_at, last_in_feed_at, updated_at)
+				VALUES ('node','aa','n-aa','repeater',` + fmt.Sprint(ts) + `,` + fmt.Sprint(ts) + `,` + fmt.Sprint(ts) + `,0,0,0);
+			-- one plain watch, one that opted into the relay signal
+			INSERT INTO watches (id, user_id, target_kind, target_key, threshold_hours, alert_on_relay, created_at)
+				VALUES (1,1,'node','aa',6,0,0), (2,1,'node','bb',12,1,0);
+			-- watch 1 is mid-outage and has ALREADY been announced once
+			INSERT INTO watch_state (watch_id, signal, state, since, consecutive, observed_at, notify_count, seeded)
+				VALUES (1,'seen','alerting',0,0,` + fmt.Sprint(ts) + `,1,0);
+			INSERT INTO watch_state (watch_id, signal, state, since, consecutive, observed_at, notify_count, seeded)
+				VALUES (2,'seen','ok',0,0,` + fmt.Sprint(ts) + `,0,0),
+				       (2,'relayed','alerting',0,0,` + fmt.Sprint(ts) + `,1,0);
+		`); err != nil {
+			t.Fatal(err)
+		}
+	}()
+
+	now := base
+	s, err := Open(dir, func() time.Time { return now })
+	if err != nil {
+		t.Fatalf("migrating a v1 database: %v", err)
+	}
+	t.Cleanup(func() { s.Close() })
+	ctx := context.Background()
+
+	// Watch 1: exactly the one signal it had, still reading last_seen.
+	r1, err := s.RulesForWatch(ctx, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(r1) != 1 {
+		t.Fatalf("watch 1 has %d rules, want 1 — nothing new may be added to an existing watch", len(r1))
+	}
+	if r1[0].Source != SourceSeen {
+		t.Errorf("rule source = %q, want %q; rebuilding it from per-type evidence would tighten it silently",
+			r1[0].Source, SourceSeen)
+	}
+	if r1[0].ThresholdHours != 6 {
+		t.Errorf("threshold = %d, want the watch's original 6", r1[0].ThresholdHours)
+	}
+
+	// The alert already announced must stay announced. Losing notify_count
+	// would let a watch that is already alerting announce itself a second
+	// time the moment the upgrade lands.
+	st := mustState(t, s, 1, SourceSeen)
+	if st.State != StateAlerting {
+		t.Errorf("state = %q, want it carried across the migration", st.State)
+	}
+	if st.NotifyCount != 1 {
+		t.Errorf("NotifyCount = %d, want 1 — otherwise the outage is announced twice", st.NotifyCount)
+	}
+
+	// Watch 2 opted into the relay signal, so it gets both rules and no more.
+	r2, _ := s.RulesForWatch(ctx, 2)
+	if len(r2) != 2 {
+		t.Fatalf("watch 2 has %d rules, want 2", len(r2))
+	}
+	sources := map[Source]bool{}
+	for _, r := range r2 {
+		sources[r.Source] = true
+		if r.ThresholdHours != 12 {
+			t.Errorf("rule %q threshold = %d, want 12", r.Source, r.ThresholdHours)
+		}
+	}
+	if !sources[SourceSeen] || !sources[SourceRelayed] {
+		t.Errorf("watch 2 rules = %v, want both seen and relayed", sources)
+	}
+	if got := mustState(t, s, 2, SourceRelayed).State; got != StateAlerting {
+		t.Errorf("relay state = %q, want it carried across", got)
+	}
+	if got := mustState(t, s, 2, SourceSeen).State; got != StateOK {
+		t.Errorf("seen state = %q, want it carried across", got)
+	}
+}
+
+// A fresh install and an upgraded one must end up with the same schema, or
+// the two diverge silently and only one of them is ever tested.
+func TestMigratedSchemaMatchesFresh(t *testing.T) {
+	upgraded, err := Open(openV1(t), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer upgraded.Close()
+	fresh, err := Open(t.TempDir(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fresh.Close()
+
+	read := func(s *Store) map[string]string {
+		rows, err := s.read.Query(
+			`SELECT name, COALESCE(sql,'') FROM sqlite_master WHERE type='table' ORDER BY name`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer rows.Close()
+		out := map[string]string{}
+		for rows.Next() {
+			var name, ddl string
+			if err := rows.Scan(&name, &ddl); err != nil {
+				t.Fatal(err)
+			}
+			out[name] = ddl
+		}
+		return out
+	}
+
+	a, b := read(upgraded), read(fresh)
+	for name, ddl := range b {
+		got, ok := a[name]
+		if !ok {
+			t.Errorf("upgraded database is missing table %q", name)
+			continue
+		}
+		if got != ddl {
+			t.Errorf("table %q differs after upgrade:\n upgraded: %s\n fresh:    %s", name, got, ddl)
+		}
+	}
+	for name := range a {
+		if _, ok := b[name]; !ok {
+			t.Errorf("upgraded database has a leftover table %q", name)
+		}
+	}
 }

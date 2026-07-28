@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -319,15 +320,78 @@ var ErrWatchLimit = errors.New("store: watch limit reached")
 // ErrDuplicateWatch is returned when this user already watches this target.
 var ErrDuplicateWatch = errors.New("store: already watching this target")
 
-// CreateWatch adds a subscription and seeds its state.
+// DefaultRules returns the rules a newly created watch starts with.
 //
-// Seeding is the interesting part. If the target is ALREADY past the
-// threshold, the watch starts in 'alerting' with notify_count = 0 and sends
-// nothing: nobody wants an alert for something that was broken before they
-// asked to watch it. Because notify_count is zero the eventual recovery is
-// silent too — you never announce recovery from an alert that was never
-// announced. On this network that is the common path, not an edge case: 526
-// of 779 targets have not been seen in over 24 hours.
+// Observers get CoreScope's plain "heard at all". They never appear in packet
+// routes — an observer reports what it hears rather than forwarding it — so
+// per-type attribution has nothing to say about one.
+//
+// Nodes get the per-type default: adverts, responses and channel messages,
+// counting both traffic the node originated and traffic it carried. Adverts
+// anchor that set deliberately. A node states its own public key outright in
+// an advert, so that part of the signal needs no path hashes at all and
+// cannot be starved by a run of narrow hop widths.
+func DefaultRules(kind string, thresholdHours int, alertOnRelay bool) []Rule {
+	if kind == string(corescope.KindObserver) {
+		return []Rule{{
+			Label: "Not heard at all", Source: SourceSeen,
+			Direction: DirEither, ThresholdHours: thresholdHours,
+		}}
+	}
+	rules := []Rule{
+		{
+			Label:  "Adverts, responses or channel messages",
+			Source: SourceTypes,
+			Types: []int{
+				corescope.TypeADVERT, corescope.TypeRESPONSE, corescope.TypeGRPTXT,
+			},
+			Direction:      DirEither,
+			ThresholdHours: thresholdHours,
+		},
+		// The backstop, and it is not optional. The rule above can only see
+		// adverts and path hops at least three bytes wide, so a node whose
+		// traffic never happens to be attributable produces no evidence — and
+		// a rule with no evidence deliberately stays quiet rather than
+		// guessing. That is the right call for precision and the wrong one
+		// for safety, because it would leave someone believing they were
+		// covered when nothing could ever fire.
+		//
+		// This rule reads CoreScope's own last_seen, which cannot be starved
+		// that way. It sits at the same threshold, and because it sees strictly
+		// more traffic it always triggers later than the rule above would have
+		// — so in normal operation the precise rule speaks first and this one
+		// never gets a word in. It only matters when the precise rule is blind.
+		{
+			Label:          "Not heard at all",
+			Source:         SourceSeen,
+			Direction:      DirEither,
+			ThresholdHours: thresholdHours,
+		},
+	}
+	if alertOnRelay {
+		// The old opt-in, still offered when adding a node. Uses CoreScope's
+		// own relay figure rather than per-type evidence, so it stays exactly
+		// the signal it has always been.
+		rules = append(rules, Rule{
+			Label:          "Stopped passing traffic",
+			Source:         SourceRelayed,
+			Direction:      DirCarried,
+			ThresholdHours: thresholdHours,
+		})
+	}
+	return rules
+}
+
+// CreateWatch adds a subscription, gives it the default rules and seeds their
+// state.
+//
+// Seeding is the interesting part. If a rule is ALREADY past its threshold,
+// it starts in 'alerting' with notify_count = 0 and sends nothing: nobody
+// wants an alert for something that was broken before they asked to watch it.
+// Because notify_count is zero the eventual recovery is silent too — you never
+// announce recovery from an alert that was never announced. On this network
+// that is the common path, not an edge case: 526 of 779 targets have not been
+// seen in over 24 hours.
 func (s *Store) CreateWatch(ctx context.Context, w Watch, maxPerUser int) (int64, error) {
 	now := s.Now().UTC()
 	var id int64
@@ -357,49 +421,127 @@ func (s *Store) CreateWatch(ctx context.Context, w Watch, maxPerUser int) (int64
 			return err
 		}
 
-		// Seed from whatever we already know about the target.
-		var seen, relayed, ever sql.NullInt64
-		err = tx.QueryRowContext(ctx,
-			`SELECT last_seen_at, last_relayed_at, relay_ever_observed_at FROM targets WHERE kind = ? AND key = ?`,
-			w.TargetKind, strings.ToLower(w.TargetKey)).Scan(&seen, &relayed, &ever)
-		known := !errors.Is(err, sql.ErrNoRows)
-		if err != nil && !errors.Is(err, sql.ErrNoRows) {
-			return err
-		}
-
-		threshold := time.Duration(w.ThresholdHours) * time.Hour
-		seedSignal := func(sig Signal, ts time.Time, applicable bool) error {
-			st := StateUnknown
-			seeded := 0
-			if applicable && known && !ts.IsZero() {
-				if now.Sub(ts) >= threshold {
-					st = StateAlerting
-					seeded = 1
-				} else {
-					st = StateOK
-				}
+		for _, r := range DefaultRules(w.TargetKind, w.ThresholdHours, w.AlertOnRelay) {
+			r.WatchID = id
+			if _, err := s.insertRuleTx(ctx, tx, r, w.TargetKind, strings.ToLower(w.TargetKey), now); err != nil {
+				return err
 			}
-			var alertingSince any
-			if st == StateAlerting {
-				alertingSince = now.Unix()
-			}
-			_, err := tx.ExecContext(ctx, `
-				INSERT INTO watch_state (watch_id, signal, state, since, consecutive,
-					observed_at, alerting_since, notify_count, seeded)
-				VALUES (?,?,?,?,0,?,?,0,?)`,
-				id, string(sig), string(st), now.Unix(), nullInt(ts), alertingSince, seeded)
-			return err
 		}
-
-		if err := seedSignal(SignalSeen, timeFrom(seen), true); err != nil {
-			return err
-		}
-		// The relay signal is only meaningful once the target has actually
-		// been observed relaying.
-		relayApplicable := w.AlertOnRelay && !timeFrom(ever).IsZero()
-		return seedSignal(SignalRelayed, timeFrom(relayed), relayApplicable)
+		return nil
 	})
 	return id, err
+}
+
+// insertRuleTx writes a rule and seeds its alert state from whatever is
+// already known about the target.
+func (s *Store) insertRuleTx(ctx context.Context, tx *sql.Tx, r Rule, kind, key string, now time.Time) (int64, error) {
+	res, err := tx.ExecContext(ctx, `
+		INSERT INTO watch_rules (watch_id, label, source, types, direction,
+			threshold_hours, created_at)
+		VALUES (?,?,?,?,?,?,?)`,
+		r.WatchID, r.Label, string(r.Source), encodeTypes(r.Types),
+		string(r.Direction), r.ThresholdHours, now.Unix())
+	if err != nil {
+		return 0, err
+	}
+	ruleID, err := res.LastInsertId()
+	if err != nil {
+		return 0, err
+	}
+
+	at, applicable, err := ruleSeedObservation(ctx, tx, kind, key, r)
+	if err != nil {
+		return 0, err
+	}
+
+	st := StateUnknown
+	seeded := 0
+	if applicable && !at.IsZero() {
+		if now.Sub(at) >= time.Duration(r.ThresholdHours)*time.Hour {
+			st = StateAlerting
+			seeded = 1
+		} else {
+			st = StateOK
+		}
+	}
+	var alertingSince any
+	if st == StateAlerting {
+		alertingSince = now.Unix()
+	}
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO watch_state (watch_id, rule_id, state, since, consecutive,
+			observed_at, alerting_since, notify_count, seeded)
+		VALUES (?,?,?,?,0,?,?,0,?)`,
+		r.WatchID, ruleID, string(st), now.Unix(), nullInt(at), alertingSince, seeded)
+	return ruleID, err
+}
+
+// ruleSeedObservation reads the timestamp a rule would evaluate right now.
+//
+// applicable is false when the rule has nothing to judge: a target CoreScope
+// has never mentioned, a node that has never been observed relaying, or — for
+// a per-type rule — a target for which none of the selected types has ever
+// produced evidence. All three must stay unknown rather than being read as
+// silence, because absence of evidence is not absence of the node.
+func ruleSeedObservation(ctx context.Context, tx *sql.Tx, kind, key string, r Rule) (time.Time, bool, error) {
+	switch r.Source {
+	case SourceSeen:
+		var seen sql.NullInt64
+		err := tx.QueryRowContext(ctx,
+			`SELECT last_seen_at FROM targets WHERE kind = ? AND key = ?`, kind, key).Scan(&seen)
+		if errors.Is(err, sql.ErrNoRows) {
+			return time.Time{}, false, nil
+		}
+		return timeFrom(seen), err == nil, err
+
+	case SourceRelayed:
+		var relayed, ever sql.NullInt64
+		err := tx.QueryRowContext(ctx,
+			`SELECT last_relayed_at, relay_ever_observed_at FROM targets WHERE kind = ? AND key = ?`,
+			kind, key).Scan(&relayed, &ever)
+		if errors.Is(err, sql.ErrNoRows) {
+			return time.Time{}, false, nil
+		}
+		if err != nil {
+			return time.Time{}, false, err
+		}
+		// A node that has never relayed has not stopped relaying.
+		return timeFrom(relayed), !timeFrom(ever).IsZero(), nil
+
+	case SourceTypes:
+		q, args := activityQuery(kind, key, r)
+		if q == "" {
+			return time.Time{}, false, nil
+		}
+		var at sql.NullInt64
+		if err := tx.QueryRowContext(ctx, q, args...).Scan(&at); err != nil {
+			return time.Time{}, false, err
+		}
+		return timeFrom(at), at.Valid, nil
+	}
+	return time.Time{}, false, nil
+}
+
+// activityQuery builds the MAX(last_at) lookup for a per-type rule. Returns
+// an empty query when the rule selects nothing, which can only happen if a
+// rule was stored with no types.
+func activityQuery(kind, key string, r Rule) (string, []any) {
+	if len(r.Types) == 0 {
+		return "", nil
+	}
+	args := []any{kind, key}
+	ph := make([]string, len(r.Types))
+	for i, t := range r.Types {
+		ph[i] = "?"
+		args = append(args, t)
+	}
+	q := `SELECT MAX(last_at) FROM target_activity
+	      WHERE kind = ? AND key = ? AND payload_type IN (` + strings.Join(ph, ",") + `)`
+	if r.Direction == DirSent || r.Direction == DirCarried {
+		q += ` AND direction = ?`
+		args = append(args, string(r.Direction))
+	}
+	return q, args
 }
 
 func (s *Store) DeleteWatch(ctx context.Context, userID, watchID int64) error {
@@ -415,30 +557,262 @@ func (s *Store) DeleteWatch(ctx context.Context, userID, watchID int64) error {
 	})
 }
 
-// UpdateWatch changes the tunable parts of a subscription.
-func (s *Store) UpdateWatch(ctx context.Context, userID, watchID int64, thresholdHours int, alertOnRelay bool, mutedUntil time.Time) error {
+// SetWatchMute silences a watch until a time, without stopping it tracking
+// reality — a muted watch still moves through its states, it just doesn't
+// shout, which is what someone doing maintenance wants.
+func (s *Store) SetWatchMute(ctx context.Context, userID, watchID int64, mutedUntil time.Time) error {
 	return s.tx(ctx, func(tx *sql.Tx) error {
 		res, err := tx.ExecContext(ctx,
-			`UPDATE watches SET threshold_hours = ?, alert_on_relay = ?, muted_until = ?
-			 WHERE id = ? AND user_id = ?`,
-			thresholdHours, boolInt(alertOnRelay), nullInt(mutedUntil), watchID, userID)
+			`UPDATE watches SET muted_until = ? WHERE id = ? AND user_id = ?`,
+			nullInt(mutedUntil), watchID, userID)
 		if err != nil {
 			return err
 		}
 		if n, _ := res.RowsAffected(); n == 0 {
 			return ErrNotFound
 		}
-		// Turning the relay signal on for a target that has relayed before
-		// needs a row to exist; turning it off leaves the row dormant.
-		if alertOnRelay {
-			_, err = tx.ExecContext(ctx, `
-				INSERT INTO watch_state (watch_id, signal, state, since, consecutive, notify_count, seeded)
-				SELECT ?, 'relayed', 'unknown', ?, 0, 0, 0
-				WHERE NOT EXISTS (SELECT 1 FROM watch_state WHERE watch_id = ? AND signal = 'relayed')`,
-				watchID, s.Now().UTC().Unix(), watchID)
+		return nil
+	})
+}
+
+// ---------------------------------------------------------------- rules --
+
+// ErrRuleLimit is returned when a watch already has as many rules as it may.
+var ErrRuleLimit = errors.New("store: rule limit reached")
+
+// MaxRulesPerWatch bounds how many conditions one watch may carry. Generous
+// for any real use; it exists so a scripted client cannot make one watch cost
+// unbounded work on every poll.
+const MaxRulesPerWatch = 12
+
+// WatchOwnedBy confirms a watch belongs to a user before anything is changed
+// through it, so a rule endpoint cannot be pointed at someone else's watch.
+func (s *Store) WatchOwnedBy(ctx context.Context, userID, watchID int64) (Watch, error) {
+	row := s.read.QueryRowContext(ctx,
+		`SELECT `+watchCols+` FROM watches WHERE id = ? AND user_id = ?`, watchID, userID)
+	w, err := scanWatch(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Watch{}, ErrNotFound
+	}
+	return w, err
+}
+
+// AddRule appends a rule to a watch and seeds its state.
+func (s *Store) AddRule(ctx context.Context, userID int64, r Rule) (int64, error) {
+	now := s.Now().UTC()
+	var id int64
+	err := s.tx(ctx, func(tx *sql.Tx) error {
+		var kind, key string
+		err := tx.QueryRowContext(ctx,
+			`SELECT target_kind, target_key FROM watches WHERE id = ? AND user_id = ?`,
+			r.WatchID, userID).Scan(&kind, &key)
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrNotFound
 		}
+		if err != nil {
+			return err
+		}
+		var n int
+		if err := tx.QueryRowContext(ctx,
+			`SELECT COUNT(*) FROM watch_rules WHERE watch_id = ?`, r.WatchID).Scan(&n); err != nil {
+			return err
+		}
+		if n >= MaxRulesPerWatch {
+			return ErrRuleLimit
+		}
+		id, err = s.insertRuleTx(ctx, tx, r, kind, key, now)
 		return err
 	})
+	return id, err
+}
+
+// DeleteRule removes one rule. Its state goes with it by cascade.
+func (s *Store) DeleteRule(ctx context.Context, userID, ruleID int64) error {
+	return s.tx(ctx, func(tx *sql.Tx) error {
+		res, err := tx.ExecContext(ctx, `
+			DELETE FROM watch_rules WHERE id = ? AND watch_id IN
+				(SELECT id FROM watches WHERE user_id = ?)`, ruleID, userID)
+		if err != nil {
+			return err
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			return ErrNotFound
+		}
+		return nil
+	})
+}
+
+const ruleCols = `id, watch_id, label, source, types, direction, threshold_hours, created_at`
+
+func scanRule(row interface{ Scan(...any) error }) (Rule, error) {
+	var r Rule
+	var source, types, dir string
+	var created int64
+	if err := row.Scan(&r.ID, &r.WatchID, &r.Label, &source, &types, &dir,
+		&r.ThresholdHours, &created); err != nil {
+		return Rule{}, err
+	}
+	r.Source = Source(source)
+	r.Types = decodeTypes(types)
+	r.Direction = Direction(dir)
+	r.CreatedAt = time.Unix(created, 0).UTC()
+	return r, nil
+}
+
+// AllRules returns every rule keyed by watch id, for the evaluator.
+func (s *Store) AllRules(ctx context.Context) (map[int64][]Rule, error) {
+	rows, err := s.read.QueryContext(ctx, `SELECT `+ruleCols+` FROM watch_rules ORDER BY id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[int64][]Rule{}
+	for rows.Next() {
+		r, err := scanRule(rows)
+		if err != nil {
+			return nil, err
+		}
+		out[r.WatchID] = append(out[r.WatchID], r)
+	}
+	return out, rows.Err()
+}
+
+// RulesForWatch returns one watch's rules in creation order.
+func (s *Store) RulesForWatch(ctx context.Context, watchID int64) ([]Rule, error) {
+	rows, err := s.read.QueryContext(ctx,
+		`SELECT `+ruleCols+` FROM watch_rules WHERE watch_id = ? ORDER BY id`, watchID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Rule
+	for rows.Next() {
+		r, err := scanRule(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// ------------------------------------------------------------- activity --
+
+// UpsertActivity records per-type evidence from one poll.
+//
+// last_at only ever moves forward, for the same reason target timestamps do:
+// the packet feed is a sliding window that can be re-read, and letting a row
+// regress would manufacture an outage out of a replayed page.
+func (s *Store) UpsertActivity(ctx context.Context, tx *sql.Tx, kind, key string, payloadType int, dir Direction, at time.Time, n int) error {
+	if at.IsZero() || n <= 0 {
+		return nil
+	}
+	_, err := tx.ExecContext(ctx, `
+		INSERT INTO target_activity (kind, key, payload_type, direction, last_at, evidence_count)
+		VALUES (?,?,?,?,?,?)
+		ON CONFLICT(kind, key, payload_type, direction) DO UPDATE SET
+			last_at = MAX(last_at, excluded.last_at),
+			evidence_count = evidence_count + excluded.evidence_count`,
+		kind, strings.ToLower(key), payloadType, string(dir), at.UTC().Unix(), n)
+	return err
+}
+
+// ActivityFor returns every per-type row recorded for one target.
+func (s *Store) ActivityFor(ctx context.Context, kind, key string) ([]Activity, error) {
+	rows, err := s.read.QueryContext(ctx, `
+		SELECT payload_type, direction, last_at, evidence_count
+		FROM target_activity WHERE kind = ? AND key = ?
+		ORDER BY payload_type`, kind, strings.ToLower(key))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Activity
+	for rows.Next() {
+		var a Activity
+		var dir string
+		var at int64
+		if err := rows.Scan(&a.PayloadType, &dir, &at, &a.EvidenceCount); err != nil {
+			return nil, err
+		}
+		a.Direction = Direction(dir)
+		a.LastAt = time.Unix(at, 0).UTC()
+		out = append(out, a)
+	}
+	return out, rows.Err()
+}
+
+// AllActivity returns every activity row keyed by "kind|key", which is what
+// the evaluator needs to judge per-type rules without an N+1 query.
+func (s *Store) AllActivity(ctx context.Context) (map[string][]Activity, error) {
+	rows, err := s.read.QueryContext(ctx,
+		`SELECT kind, key, payload_type, direction, last_at, evidence_count FROM target_activity`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string][]Activity{}
+	for rows.Next() {
+		var kind, key, dir string
+		var a Activity
+		var at int64
+		if err := rows.Scan(&kind, &key, &a.PayloadType, &dir, &at, &a.EvidenceCount); err != nil {
+			return nil, err
+		}
+		a.Direction = Direction(dir)
+		a.LastAt = time.Unix(at, 0).UTC()
+		out[kind+"|"+key] = append(out[kind+"|"+key], a)
+	}
+	return out, rows.Err()
+}
+
+// FeedCursor is the highest packet id already ingested.
+func (s *Store) FeedCursor(ctx context.Context) (int64, error) {
+	var id int64
+	err := s.read.QueryRowContext(ctx, `SELECT last_packet_id FROM feed_cursor WHERE id = 1`).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, nil
+	}
+	return id, err
+}
+
+// SetFeedCursor advances the high-water mark inside the caller's transaction,
+// so evidence and the cursor that says it was consumed commit together.
+func (s *Store) SetFeedCursor(ctx context.Context, tx *sql.Tx, id int64) error {
+	_, err := tx.ExecContext(ctx, `
+		INSERT INTO feed_cursor (id, last_packet_id, updated_at) VALUES (1, ?, ?)
+		ON CONFLICT(id) DO UPDATE SET
+			last_packet_id = MAX(last_packet_id, excluded.last_packet_id),
+			updated_at = excluded.updated_at`,
+		id, s.Now().UTC().Unix())
+	return err
+}
+
+// encodeTypes renders a rule's payload types for storage.
+func encodeTypes(types []int) string {
+	if len(types) == 0 {
+		return ""
+	}
+	parts := make([]string, len(types))
+	for i, t := range types {
+		parts[i] = strconv.Itoa(t)
+	}
+	return strings.Join(parts, ",")
+}
+
+// decodeTypes parses a stored type list, skipping anything unparseable rather
+// than failing the query — one bad row should not take the dashboard down.
+func decodeTypes(s string) []int {
+	if strings.TrimSpace(s) == "" {
+		return nil
+	}
+	var out []int
+	for _, p := range strings.Split(s, ",") {
+		if n, err := strconv.Atoi(strings.TrimSpace(p)); err == nil {
+			out = append(out, n)
+		}
+	}
+	return out
 }
 
 const watchCols = `id, user_id, target_kind, target_key, threshold_hours,
@@ -485,20 +859,19 @@ func (s *Store) CountWatches(ctx context.Context) (int, error) {
 
 // ---------------------------------------------------------- watch state --
 
-const stateCols = `watch_id, signal, state, since, consecutive, observed_at,
+const stateCols = `watch_id, rule_id, state, since, consecutive, observed_at,
 	alerting_since, last_notified_at, notify_count, seeded`
 
 func scanState(row interface{ Scan(...any) error }) (WatchState, error) {
 	var st WatchState
-	var sig, state string
+	var state string
 	var since int64
 	var observed, alerting, notified sql.NullInt64
 	var seeded int
-	if err := row.Scan(&st.WatchID, &sig, &state, &since, &st.Consecutive,
+	if err := row.Scan(&st.WatchID, &st.RuleID, &state, &since, &st.Consecutive,
 		&observed, &alerting, &notified, &st.NotifyCount, &seeded); err != nil {
 		return WatchState{}, err
 	}
-	st.Signal = Signal(sig)
 	st.State = State(state)
 	st.Since = time.Unix(since, 0).UTC()
 	st.ObservedAt = timeFrom(observed)
@@ -508,23 +881,23 @@ func scanState(row interface{ Scan(...any) error }) (WatchState, error) {
 	return st, nil
 }
 
-// AllWatchState returns every state row keyed by watch id and signal.
-func (s *Store) AllWatchState(ctx context.Context) (map[int64]map[Signal]WatchState, error) {
+// AllWatchState returns every state row keyed by watch id and rule id.
+func (s *Store) AllWatchState(ctx context.Context) (map[int64]map[int64]WatchState, error) {
 	rows, err := s.read.QueryContext(ctx, `SELECT `+stateCols+` FROM watch_state`)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	out := map[int64]map[Signal]WatchState{}
+	out := map[int64]map[int64]WatchState{}
 	for rows.Next() {
 		st, err := scanState(rows)
 		if err != nil {
 			return nil, err
 		}
 		if out[st.WatchID] == nil {
-			out[st.WatchID] = map[Signal]WatchState{}
+			out[st.WatchID] = map[int64]WatchState{}
 		}
-		out[st.WatchID][st.Signal] = st
+		out[st.WatchID][st.RuleID] = st
 	}
 	return out, rows.Err()
 }
@@ -532,16 +905,16 @@ func (s *Store) AllWatchState(ctx context.Context) (map[int64]map[Signal]WatchSt
 // SaveWatchState persists one evaluated state row.
 func (s *Store) SaveWatchState(ctx context.Context, tx *sql.Tx, st WatchState) error {
 	_, err := tx.ExecContext(ctx, `
-		INSERT INTO watch_state (watch_id, signal, state, since, consecutive,
+		INSERT INTO watch_state (watch_id, rule_id, state, since, consecutive,
 			observed_at, alerting_since, last_notified_at, notify_count, seeded)
 		VALUES (?,?,?,?,?,?,?,?,?,?)
-		ON CONFLICT(watch_id, signal) DO UPDATE SET
+		ON CONFLICT(watch_id, rule_id) DO UPDATE SET
 			state = excluded.state, since = excluded.since,
 			consecutive = excluded.consecutive, observed_at = excluded.observed_at,
 			alerting_since = excluded.alerting_since,
 			last_notified_at = excluded.last_notified_at,
 			notify_count = excluded.notify_count, seeded = excluded.seeded`,
-		st.WatchID, string(st.Signal), string(st.State), st.Since.UTC().Unix(),
+		st.WatchID, st.RuleID, string(st.State), st.Since.UTC().Unix(),
 		st.Consecutive, nullInt(st.ObservedAt), nullInt(st.AlertingSince),
 		nullInt(st.LastNotified), st.NotifyCount, boolInt(st.Seeded))
 	return err
@@ -721,11 +1094,12 @@ func (s *Store) DropNotification(ctx context.Context, id int64, reason string) e
 	})
 }
 
-func (s *Store) RecordAlertEvent(ctx context.Context, tx *sql.Tx, watchID int64, sig Signal, from, to State, pollRunID int64, notified bool) error {
+func (s *Store) RecordAlertEvent(ctx context.Context, tx *sql.Tx, watchID, ruleID int64, label string, from, to State, pollRunID int64, notified bool) error {
 	_, err := tx.ExecContext(ctx,
-		`INSERT INTO alert_events (watch_id, signal, from_state, to_state, at, poll_run_id, notified)
-		 VALUES (?,?,?,?,?,?,?)`,
-		watchID, string(sig), string(from), string(to), s.Now().UTC().Unix(), pollRunID, boolInt(notified))
+		`INSERT INTO alert_events (watch_id, rule_id, signal, from_state, to_state, at, poll_run_id, notified)
+		 VALUES (?,?,?,?,?,?,?,?)`,
+		watchID, ruleID, label, string(from), string(to),
+		s.Now().UTC().Unix(), pollRunID, boolInt(notified))
 	return err
 }
 
@@ -765,16 +1139,17 @@ func (s *Store) WatchViews(ctx context.Context, userID int64) ([]WatchView, erro
 	if err != nil {
 		return nil, err
 	}
+	rules, err := s.AllRules(ctx)
+	if err != nil {
+		return nil, err
+	}
 	for i := range views {
-		byS := states[views[i].Watch.ID]
-		views[i].Seen = byS[SignalSeen]
-		if views[i].Watch.AlertOnRelay {
-			if st, ok := byS[SignalRelayed]; ok {
-				stCopy := st
-				views[i].Relay = &stCopy
-			}
+		w := views[i].Watch
+		byRule := states[w.ID]
+		for _, r := range rules[w.ID] {
+			views[i].Rules = append(views[i].Rules, RuleView{Rule: r, State: byRule[r.ID]})
 		}
-		t, err := s.Target(ctx, views[i].Watch.TargetKind, views[i].Watch.TargetKey)
+		t, err := s.Target(ctx, w.TargetKind, w.TargetKey)
 		if err == nil {
 			tCopy := t
 			views[i].Target = &tCopy
@@ -783,6 +1158,36 @@ func (s *Store) WatchViews(ctx context.Context, userID int64) ([]WatchView, erro
 		}
 	}
 	return views, nil
+}
+
+// WatchViewByID returns one watch's full view, for the detail page.
+func (s *Store) WatchViewByID(ctx context.Context, userID, watchID int64) (WatchView, error) {
+	w, err := s.WatchOwnedBy(ctx, userID, watchID)
+	if err != nil {
+		return WatchView{}, err
+	}
+	v := WatchView{Watch: w}
+
+	rules, err := s.RulesForWatch(ctx, watchID)
+	if err != nil {
+		return WatchView{}, err
+	}
+	states, err := s.AllWatchState(ctx)
+	if err != nil {
+		return WatchView{}, err
+	}
+	for _, r := range rules {
+		v.Rules = append(v.Rules, RuleView{Rule: r, State: states[watchID][r.ID]})
+	}
+
+	t, err := s.Target(ctx, w.TargetKind, w.TargetKey)
+	if err == nil {
+		tCopy := t
+		v.Target = &tCopy
+	} else if !errors.Is(err, ErrNotFound) {
+		return WatchView{}, err
+	}
+	return v, nil
 }
 
 func boolInt(b bool) int {
