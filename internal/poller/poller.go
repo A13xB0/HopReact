@@ -239,13 +239,23 @@ func (p *Poller) ingest(ctx context.Context, snap corescope.Snapshot) (int, erro
 	// if it falls outside that range at either end: newer than anything seen,
 	// or older than anything seen. That is what lets the backfill add history
 	// without counting the overlap with what has already been read twice.
+	//
+	// A zero low means "we don't know how far back we have read" — the state
+	// of any install that predates the low-water mark. It must NOT be taken
+	// literally as id 0, or the consumed range becomes the whole of history
+	// and the backfill silently records nothing. Treat it as knowing only
+	// about high itself; the cost is re-counting one recent page, once.
+	lowKnown := cursor.Low
+	if lowKnown == 0 {
+		lowKnown = cursor.High
+	}
 	low, high := cursor.Low, cursor.High
 	fresh := 0
 	for _, pk := range packets {
 		if pk.At.IsZero() {
 			continue
 		}
-		seenBefore := cursor.High > 0 && pk.ID <= cursor.High && pk.ID >= cursor.Low
+		seenBefore := cursor.High > 0 && pk.ID <= cursor.High && pk.ID >= lowKnown
 		if pk.ID > high {
 			high = pk.ID
 		}

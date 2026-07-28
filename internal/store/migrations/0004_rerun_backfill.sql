@@ -1,0 +1,21 @@
+-- Re-run the history backfill on installs that were upgraded, not created,
+-- by v0.2.1.
+--
+-- 0003 added low_packet_id with a default of 0. On an existing install that
+-- read literally: "we have already counted every packet from id 0 up to the
+-- cursor" — which is the whole of history. The backfill duly fetched a day of
+-- packets and recorded five of them, because everything else looked like
+-- something we had already seen. Production upgraded into exactly that state.
+--
+-- The evaluation side now treats a zero low as "we don't know how far back we
+-- have read" rather than as id 0, so the range is honest. This clears the
+-- marker so the backfill actually runs once against that corrected logic.
+--
+-- Re-running is cheap and safe: one request, and last_at is only ever moved
+-- forward, so older evidence can never drag a timestamp backwards. The one
+-- cost is that packets in the most recently read page are counted toward
+-- evidence_count a second time. That figure is a rough indication of how much
+-- support a rule has, not something alerting depends on, so a one-off
+-- overcount of a few hundred is the right trade for having a day of history
+-- that is actually there.
+UPDATE feed_cursor SET backfilled_at = 0 WHERE id = 1;

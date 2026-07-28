@@ -2,6 +2,7 @@ package poller
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -653,5 +654,56 @@ func TestBackfillOnlyRunsOnce(t *testing.T) {
 		if a.EvidenceCount != 1 {
 			t.Errorf("evidence count = %d after repeated polls, want 1", a.EvidenceCount)
 		}
+	}
+}
+
+// The bug that shipped in v0.2.1 and was caught in production: an install
+// upgraded rather than created has a cursor whose low-water mark is zero,
+// because nothing recorded how far back it had read. Taken literally that
+// says "every packet from id 0 upwards has been counted", i.e. all of
+// history, so the backfill fetched a day of packets and recorded five.
+//
+// A zero low means "unknown", never "id 0".
+func TestBackfillWorksOnAnUpgradedInstallWithNoLowWaterMark(t *testing.T) {
+	h := newHarness(t, nil)
+	ctx := context.Background()
+
+	// Simulate the upgraded state: plenty already read, no low-water mark,
+	// and the backfill not yet run.
+	if err := h.st.WriteTx(ctx, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx,
+			`UPDATE feed_cursor SET low_packet_id = 0, last_packet_id = 5000, backfilled_at = 0 WHERE id = 1`)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	h.scope.setNodes(h.now, 200, time.Minute)
+	// History from well before the cursor — exactly what the backfill exists
+	// to collect, and exactly what the bug discarded.
+	h.scope.packets = []map[string]any{
+		advertPacket(100, 0, h.now.Add(-20*time.Hour)),
+		carriedPacket(101, corescope.TypeGRPTXT, 0, h.now.Add(-18*time.Hour)),
+		carriedPacket(102, corescope.TypeACK, 0, h.now.Add(-15*time.Hour)),
+	}
+	h.watch(t, key(0), 6)
+	h.poll(t)
+
+	acts, err := h.st.ActivityFor(ctx, "node", key(0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(acts) < 3 {
+		t.Fatalf("recorded %d activity rows from a 3-packet backfill, want 3 — "+
+			"an unknown low-water mark was read as 'all of history already counted'", len(acts))
+	}
+	var sawAck bool
+	for _, a := range acts {
+		if a.PayloadType == corescope.TypeACK {
+			sawAck = true
+		}
+	}
+	if !sawAck {
+		t.Error("the 15-hour-old ACK should be in the table rather than reading 'never'")
 	}
 }
