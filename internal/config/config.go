@@ -128,6 +128,16 @@ type StatusConfig struct {
 	// Services are the dependencies HopReact cannot infer from packets: the
 	// MQTT broker observers report through, and whatever runs beside it.
 	Services []ServiceCheck `yaml:"services"`
+	// MQTTWindowMinutes decides the derived "MQTT ingest" row: if no observer
+	// has checked in within this long, the broker is almost certainly down.
+	//
+	// This is measured rather than probed on purpose. A TCP connect only
+	// proves a socket is listening; observers still reporting proves the
+	// whole ingest path works — broker, auth, and the ingestor behind it. It
+	// also works when the broker is firewalled away from this host, which is
+	// the normal arrangement. 0 disables the row.
+	MQTTWindowMinutes int `yaml:"mqtt_window_minutes"`
+
 	// ServiceInterval is how often those are probed. Results are cached, so a
 	// public page never becomes a request amplifier.
 	ServiceInterval time.Duration `yaml:"service_interval"`
@@ -257,18 +267,19 @@ func Default() Config {
 			BackfillHours:          24,
 		},
 		Status: StatusConfig{
-			Enabled:          false,
-			Title:            "Repeater status",
-			QuietHours:       12,
-			ConcernHours:     24,
-			AlarmHours:       36,
-			RecentHours:      24,
-			RecentLimit:      10,
-			StaleAfterDays:   7,
-			CoreGraceDays:    7,
-			CoreBridgeScore:  0.2,
-			CoreTrafficShare: 0.3,
-			ServiceInterval:  time.Minute,
+			Enabled:           false,
+			Title:             "Repeater status",
+			QuietHours:        12,
+			ConcernHours:      24,
+			AlarmHours:        36,
+			RecentHours:       24,
+			RecentLimit:       10,
+			StaleAfterDays:    7,
+			CoreGraceDays:     7,
+			CoreBridgeScore:   0.2,
+			CoreTrafficShare:  0.3,
+			ServiceInterval:   time.Minute,
+			MQTTWindowMinutes: 15,
 		},
 		Alerts: AlertsConfig{
 			ConfirmPolls:        2,

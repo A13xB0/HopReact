@@ -559,3 +559,68 @@ func TestServiceLinksToItsOriginNotItsProbe(t *testing.T) {
 		t.Error("the probe path is not a page for a human to visit")
 	}
 }
+
+// The broker is inferred, not probed. One observer going quiet is that
+// observer's problem; all of them going quiet at once is the path they share.
+func TestMQTTIngestIsInferredFromObservers(t *testing.T) {
+	now := t0
+	obs := func(ages ...time.Duration) []store.StatusTarget {
+		var out []store.StatusTarget
+		for _, a := range ages {
+			out = append(out, store.StatusTarget{Kind: "observer", LastSeen: now.Add(-a)})
+		}
+		return out
+	}
+	for _, c := range []struct {
+		name  string
+		in    []store.StatusTarget
+		class string
+	}{
+		{"all reporting", obs(time.Minute, 2*time.Minute, time.Minute), "good"},
+		{"most reporting", obs(time.Minute, 2*time.Minute, 4*time.Hour), "good"},
+		{"half silent", obs(time.Minute, 4*time.Hour, 4*time.Hour), "amber"},
+		{"all silent — the broker", obs(4*time.Hour, 5*time.Hour, 6*time.Hour), "bad"},
+		{"no observers at all", nil, "muted"},
+	} {
+		got := mqttRow(c.in, now, 15)
+		if got.Status.Class != c.class {
+			t.Errorf("%s: class = %q, want %q", c.name, got.Status.Class, c.class)
+		}
+	}
+
+	// The red case must explain why it blames the broker rather than the
+	// stations, or it is just an assertion.
+	down := mqttRow(obs(4*time.Hour, 5*time.Hour), now, 15)
+	if !strings.Contains(down.Status.Why, "same broker") {
+		t.Errorf("the explanation should say why one cause is likelier than many: %q", down.Status.Why)
+	}
+	// Nodes are not observers and must not count towards it.
+	mixed := append(obs(4*time.Hour), store.StatusTarget{Kind: "node", LastSeen: now})
+	if mqttRow(mixed, now, 15).Status.Class != "bad" {
+		t.Error("a healthy repeater says nothing about whether observers can publish")
+	}
+}
+
+// And it lands in the critical group, so losing the broker is a major outage.
+func TestMQTTRowAppearsInObserverServices(t *testing.T) {
+	srv, st, h := statusServer(t, nil)
+	srv.Cfg.Status.MQTTWindowMinutes = 15
+	ctx := context.Background()
+	if _, err := st.UpsertTargets(ctx, []corescope.Observation{
+		{Kind: corescope.KindObserver, Key: "o1", Name: "Obs One", LastSeen: t0.Add(-8 * time.Hour)},
+		{Kind: corescope.KindObserver, Key: "o2", Name: "Obs Two", LastSeen: t0.Add(-9 * time.Hour)},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/status", nil))
+	body := rec.Body.String()
+
+	svc := body[strings.Index(body, "Observer services"):strings.Index(body, "Core repeaters")]
+	if !strings.Contains(svc, "MQTT ingest") {
+		t.Fatal("the broker belongs in the critical services group")
+	}
+	if !strings.Contains(body, "Major outage") {
+		t.Error("every observer silent means the broker is down, which is a major outage")
+	}
+}

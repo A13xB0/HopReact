@@ -187,6 +187,15 @@ status:
   # cries wolf is worse than one that stays quiet. The real signal for broker
   # health is already on the board: if MQTT stops, every observer stops
   # checking in at once, and the Observers group turns red together.
+  # The broker is checked by inference rather than by probe: observers publish
+  # everything they hear through it, so if it stops they all fall silent at
+  # once. That is a stronger signal than a TCP connect — it tests the whole
+  # ingest path including auth and the ingestor behind it — and it works when
+  # the broker is firewalled away from this host, which is the normal
+  # arrangement. If no observer has reported within this many minutes, the
+  # broker is reported down. 0 removes the row.
+  mqtt_window_minutes: 15
+
   service_interval: 60s
   services: []
   #  - name: "CoreScope"

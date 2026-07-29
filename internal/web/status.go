@@ -11,6 +11,7 @@ import (
 
 	"hopreact/internal/corescope"
 	"hopreact/internal/health"
+	"hopreact/internal/store"
 )
 
 // The public status board.
@@ -251,6 +252,13 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	if s.Health != nil {
 		probes = s.Health.Results()
 	}
+	// The broker itself, inferred rather than probed. Observers publish
+	// everything they hear through MQTT, so if the broker stops they all fall
+	// silent together — which is both a stronger signal than a TCP connect
+	// and one that works when the broker is firewalled away from this host.
+	if c.MQTTWindowMinutes > 0 {
+		services.tally(mqttRow(targets, now, c.MQTTWindowMinutes))
+	}
 	for _, res := range probes {
 		st := statusState{Known: true, Since: res.At, Why: res.Note}
 		if res.OK {
@@ -426,6 +434,49 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	d := s.page(r, page.Title)
 	d.Status = &page
 	s.render(w, "status.html", d)
+}
+
+// mqttRow derives broker health from whether observers are still reporting.
+//
+// One observer going quiet is that observer's problem. All of them going
+// quiet at once is the path they share, and that is the broker.
+func mqttRow(targets []store.StatusTarget, now time.Time, windowMin int) statusRow {
+	cutoff := now.Add(-time.Duration(windowMin) * time.Minute)
+	var total, fresh int
+	var newest time.Time
+	for _, t := range targets {
+		if t.Kind != "observer" {
+			continue
+		}
+		total++
+		if t.LastSeen.After(newest) {
+			newest = t.LastSeen
+		}
+		if t.LastSeen.After(cutoff) {
+			fresh++
+		}
+	}
+
+	row := statusRow{Name: "MQTT ingest"}
+	st := statusState{Since: newest, Known: !newest.IsZero()}
+	switch {
+	case total == 0:
+		st.Class, st.Label, st.Known = "muted", "no observers", false
+		st.Why = "No observer stations are known yet, so there is nothing to infer the broker's health from."
+	case fresh == 0:
+		st.Class, st.Label = "bad", "no reports"
+		st.Why = fmt.Sprintf("None of the %d observer stations has reported in for %d minutes. They all publish through the same broker, so the broker itself is the likely cause rather than %d separate failures.", total, windowMin, total)
+	case fresh*2 <= total:
+		st.Class, st.Label = "amber", "partial"
+		st.Why = fmt.Sprintf("Only %d of %d observer stations have reported in the last %d minutes. Fewer than half is worth a look, though it may be those stations rather than the broker.", fresh, total, windowMin)
+	default:
+		st.Class, st.Label = "good", "operational"
+		st.Why = fmt.Sprintf("%d of %d observer stations have reported in the last %d minutes, so the broker is carrying traffic. This is inferred from the stations rather than probed directly — it tests the whole ingest path, not just an open socket.", fresh, total, windowMin)
+	}
+	row.Status = st
+	row.Detail = fmt.Sprintf("%d of %d stations reporting", fresh, total)
+	row.rank = rankOf(st.Class)
+	return row
 }
 
 // nodeLink points at a node's page on the CoreScope instance this board is
