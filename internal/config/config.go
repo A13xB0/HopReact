@@ -115,6 +115,15 @@ type StatusConfig struct {
 	// nodes appear, or one that is quiet today because its neighbours are
 	// down. Matched as a case-insensitive prefix, so a short hash is enough.
 	CoreKeys []string `yaml:"core_keys"`
+	// CoreGraceDays keeps a repeater in the backbone group for this long
+	// after its scores stop qualifying.
+	//
+	// Without it the classification is backwards. CoreScope's scores run over
+	// a rolling window of recent packets, so a repeater that dies stops
+	// scoring within about a day — meaning a core repeater going down would
+	// demote itself out of the critical group, and the board would downgrade
+	// the outage at exactly the moment it mattered most.
+	CoreGraceDays int `yaml:"core_grace_days"`
 
 	// Services are the dependencies HopReact cannot infer from packets: the
 	// MQTT broker observers report through, and whatever runs beside it.
@@ -256,6 +265,7 @@ func Default() Config {
 			RecentHours:      24,
 			RecentLimit:      10,
 			StaleAfterDays:   7,
+			CoreGraceDays:    7,
 			CoreBridgeScore:  0.2,
 			CoreTrafficShare: 0.3,
 			ServiceInterval:  time.Minute,
@@ -378,6 +388,9 @@ func (c Config) Validate() error {
 		}
 		if c.Status.RecentHours < 1 {
 			return fmt.Errorf("status.recent_hours must be at least 1, got %d", c.Status.RecentHours)
+		}
+		if c.Status.CoreGraceDays < 0 {
+			return fmt.Errorf("status.core_grace_days must not be negative")
 		}
 		if c.Status.StaleAfterDays < 0 {
 			return fmt.Errorf("status.stale_after_days must not be negative (0 disables the cutoff)")

@@ -167,6 +167,15 @@ status:
   core_keys: []
   #  - "02f1fec873"   # West Lomond
 
+  # How long a repeater stays in the backbone group after its scores stop
+  # qualifying. This is not politeness — it is a correctness fix. CoreScope's
+  # scores run over a rolling window of recent packets, so a repeater that
+  # dies stops scoring within about a day. Judged on the current score alone,
+  # a core repeater going down would demote itself out of the critical group
+  # and the board would downgrade the outage at exactly the moment it mattered
+  # most. 0 disables the grace period.
+  core_grace_days: 7
+
   # Services the mesh depends on that cannot be inferred from packets.
   # Probed on a timer and cached, so a public page never becomes a request
   # amplifier. kind is "http" (any response under 500 counts) or "tcp" (the

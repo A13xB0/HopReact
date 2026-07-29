@@ -121,6 +121,17 @@ func (p *Poller) PollOnce(ctx context.Context) error {
 	}
 	run.AdvancedCount = advanced
 
+	// Remember which repeaters currently qualify as backbone. CoreScope's
+	// scores run over a rolling window, so a repeater that dies stops scoring
+	// within a day — and the status board must not quietly demote it out of
+	// the critical group at the moment it goes down.
+	if fetchErr == nil && p.Cfg.Status.Enabled {
+		if err := p.Store.MarkCoreRepeaters(ctx,
+			p.Cfg.Status.CoreBridgeScore, p.Cfg.Status.CoreTrafficShare); err != nil {
+			p.Log.Warn("could not record which repeaters are backbone", "err", err)
+		}
+	}
+
 	// Per-type evidence. Best-effort on purpose: if the packet feed is
 	// unavailable, the seen and relayed signals are still perfectly good, and
 	// per-type rules should degrade to "no fresh evidence" — which the

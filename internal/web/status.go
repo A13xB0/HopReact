@@ -344,11 +344,23 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		row.rank = rankOf(row.Status.Class)
 
 		pinned := isPinnedCore(t.Key, c.CoreKeys)
-		if pinned || t.BridgeScore >= c.CoreBridgeScore || t.TrafficShare >= c.CoreTrafficShare {
+		scores := t.BridgeScore >= c.CoreBridgeScore || t.TrafficShare >= c.CoreTrafficShare
+		// Still backbone if it was recently, even though the scores have
+		// lapsed — which is exactly what happens when one goes down.
+		recently := c.CoreGraceDays > 0 && !t.LastCoreAt.IsZero() &&
+			t.LastCoreAt.After(now.AddDate(0, 0, -c.CoreGraceDays))
+
+		if pinned || scores || recently {
 			row.Detail = fmt.Sprintf("bridge %.0f%% · traffic %.0f%%",
 				t.BridgeScore*100, t.TrafficShare*100)
-			if pinned {
+			switch {
+			case pinned:
 				row.Detail += " · marked core"
+			case !scores && recently:
+				// Say so, or a reader wonders why a node scoring nothing is
+				// listed as backbone.
+				row.Detail += " · backbone until " +
+					stamp(t.LastCoreAt.AddDate(0, 0, c.CoreGraceDays))
 			}
 			core.tally(row)
 		} else {

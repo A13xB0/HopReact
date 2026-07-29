@@ -1419,6 +1419,22 @@ func (s *Store) UsersWithWatches(ctx context.Context) ([]User, error) {
 
 // ------------------------------------------------------------- status ----
 
+// MarkCoreRepeaters stamps every repeater whose current scores qualify it as
+// backbone.
+//
+// Kept separate from UpsertTargets because it is a judgement using thresholds
+// the store has no business knowing. Called once per poll, right after the
+// scores are written.
+func (s *Store) MarkCoreRepeaters(ctx context.Context, minBridge, minTraffic float64) error {
+	return s.tx(ctx, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx,
+			`UPDATE targets SET last_core_at = ?
+			 WHERE kind = 'node' AND (bridge_score >= ? OR traffic_share >= ?)`,
+			s.Now().UTC().Unix(), minBridge, minTraffic)
+		return err
+	})
+}
+
 // StatusTarget is one repeater as the public board sees it: where it is, and
 // when it was last seen doing each of the two things the board reports on.
 type StatusTarget struct {
@@ -1432,6 +1448,8 @@ type StatusTarget struct {
 	// measures, used to pick out the backbone.
 	BridgeScore  float64
 	TrafficShare float64
+	// LastCoreAt is when the scores last said backbone. Zero means never.
+	LastCoreAt time.Time
 
 	// LastSeen is CoreScope's own figure, used only for ordering and for the
 	// "never heard of it" case.
@@ -1456,7 +1474,7 @@ type StatusTarget struct {
 func (s *Store) StatusTargets(ctx context.Context, standardTypes []int) ([]StatusTarget, error) {
 	rows, err := s.read.QueryContext(ctx,
 		`SELECT kind, key, name, role, lat, lon, last_seen_at, last_packet_at,
-		        bridge_score, traffic_share
+		        bridge_score, traffic_share, last_core_at
 		 FROM targets
 		 WHERE (kind = 'node' AND role IN ('repeater','room')) OR kind = 'observer'`)
 	if err != nil {
@@ -1468,15 +1486,16 @@ func (s *Store) StatusTargets(ctx context.Context, standardTypes []int) ([]Statu
 	byKey := map[string]int{}
 	for rows.Next() {
 		var t StatusTarget
-		var seen, packet sql.NullInt64
+		var seen, packet, core sql.NullInt64
 		var bridge, traffic sql.NullFloat64
 		if err := rows.Scan(&t.Kind, &t.Key, &t.Name, &t.Role, &t.Lat, &t.Lon,
-			&seen, &packet, &bridge, &traffic); err != nil {
+			&seen, &packet, &bridge, &traffic, &core); err != nil {
 			return nil, err
 		}
 		t.LastSeen = timeFrom(seen)
 		t.LastPacket = timeFrom(packet)
 		t.BridgeScore, t.TrafficShare = bridge.Float64, traffic.Float64
+		t.LastCoreAt = timeFrom(core)
 		// Observers and nodes can share a key; the board keeps them apart, so
 		// the activity index is keyed by both.
 		byKey[t.Kind+"|"+t.Key] = len(out)

@@ -399,3 +399,88 @@ func TestCoreKeysOverrideTheScores(t *testing.T) {
 		t.Error("blank entries must not match everything")
 	}
 }
+
+// The failure this guards against: CoreScope's scores run over a rolling
+// window, so a repeater that dies stops scoring within about a day. Judging
+// backbone membership on the current score alone would have a core repeater
+// demote itself out of the critical group the moment it went down — and the
+// board would downgrade the outage exactly when it mattered most.
+func TestDeadCoreRepeaterStaysCore(t *testing.T) {
+	srv, st, h := statusServer(t, nil)
+	srv.Region = region(t)
+	srv.Cfg.Status.CoreGraceDays = 7
+	ctx := context.Background()
+	lat, lon := 56.5, -3.5
+
+	// It qualified two days ago and has since gone quiet, so CoreScope has
+	// stopped scoring it.
+	if _, err := st.UpsertTargets(ctx, []corescope.Observation{
+		{Kind: corescope.KindNode, Key: "aa", Name: "Fallen Backbone", Role: "repeater",
+			LastSeen: t0.Add(-40 * time.Hour), Lat: &lat, Lon: &lon,
+			BridgeScore: 0, TrafficShare: 0},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.WriteTx(ctx, func(tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE targets SET last_core_at = ? WHERE key = 'aa'`,
+			t0.Add(-48*time.Hour).Unix()); err != nil {
+			return err
+		}
+		// Real evidence from before it died, so the row is judged as down
+		// rather than as one we simply cannot see.
+		return st.UpsertActivity(ctx, tx, "node", "aa", corescope.TypeADVERT,
+			store.DirSent, t0.Add(-40*time.Hour), 12)
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/status", nil))
+	body := rec.Body.String()
+
+	core := body[strings.Index(body, "Core repeaters"):]
+	core = core[:strings.Index(core, "Observers")]
+	if !strings.Contains(core, "Fallen Backbone") {
+		t.Fatal("a repeater that was backbone two days ago must stay in the core group while down")
+	}
+	if !strings.Contains(body, "backbone until") {
+		t.Error("the board should say why a node scoring zero is listed as backbone")
+	}
+	// And because it is in a critical group, this is a real outage.
+	if !strings.Contains(body, "Major outage") {
+		t.Error("a dead backbone repeater is a major outage, not degradation")
+	}
+}
+
+// The grace has to lapse, or the core list only ever grows.
+func TestCoreMembershipLapsesEventually(t *testing.T) {
+	srv, st, h := statusServer(t, nil)
+	srv.Region = region(t)
+	srv.Cfg.Status.CoreGraceDays = 7
+	srv.Cfg.Status.StaleAfterDays = 0 // keep it on the board so we can see where it lands
+	ctx := context.Background()
+	lat, lon := 56.5, -3.5
+	if _, err := st.UpsertTargets(ctx, []corescope.Observation{
+		{Kind: corescope.KindNode, Key: "aa", Name: "Long Demoted", Role: "repeater",
+			LastSeen: t0.Add(-time.Minute), Lat: &lat, Lon: &lon},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.WriteTx(ctx, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx,
+			`UPDATE targets SET last_core_at = ? WHERE key = 'aa'`,
+			t0.AddDate(0, 0, -30).Unix())
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/status", nil))
+	body := rec.Body.String()
+	core := body[strings.Index(body, "Core repeaters"):]
+	core = core[:strings.Index(core, "Observers")]
+	if strings.Contains(core[:strings.Index(core, "Repeaters</h2>")+1], "Long Demoted") {
+		t.Error("a repeater unimportant for a month should have lapsed out of the core group")
+	}
+}

@@ -1,0 +1,13 @@
+-- When a repeater last qualified as backbone.
+--
+-- CoreScope's bridge and traffic-share scores are computed over a rolling
+-- window of recent packets, so a repeater that dies stops scoring within about
+-- a day. Judging "is this backbone?" purely on the current score therefore has
+-- it backwards: a core repeater going down quietly demotes itself out of the
+-- core group, and the board downgrades the outage at exactly the moment it
+-- matters most.
+--
+-- This records the last time the scores said backbone, so membership can
+-- persist through an outage and only lapse after the node has genuinely been
+-- unimportant for a while.
+ALTER TABLE targets ADD COLUMN last_core_at INTEGER;
