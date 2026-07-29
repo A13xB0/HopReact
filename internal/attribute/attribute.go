@@ -15,6 +15,17 @@
 // for anyone, ever. "This node carried a message" is — and that is the
 // distinction Direction exists to keep honest.
 //
+// # A path is only history on a flood route
+//
+// On a flood route each relay appends its own hash, so the path records who
+// really carried the packet. On a direct route the path is the route the
+// SENDER chose, and each hop removes itself before forwarding — a node still
+// listed there has not touched the packet yet. Reading a direct path as
+// history credits repeaters for work they have not done.
+//
+// TRACE is a special case on top of that: its path field carries SNR
+// readings rather than hashes, so those bytes are not identities at all.
+//
 // # A hop is only an identification at three bytes
 //
 // Path hops are prefixes of the relaying node's public key, and their width is
@@ -132,6 +143,21 @@ func Attribute(p corescope.Packet, idx Index) []Hit {
 
 	if p.PayloadType == corescope.TypeADVERT && len(p.AdvertPubKey) == 64 {
 		hits = append(hits, Hit{Key: p.AdvertPubKey, Type: p.PayloadType, Direction: DirSent})
+	}
+
+	// A path only records where a packet HAS BEEN on a flood route, where
+	// each relay appends its own hash. On a direct route the path is the
+	// route the sender chose, and every hop removes itself before forwarding
+	// — so a node still listed there is where the packet is GOING. Counting
+	// that as "carried" credits a repeater for work it has not done, and on
+	// the live mesh it accounted for 1,886 of 21,882 attributions, most of
+	// them REQ packets on their way TO a repeater.
+	//
+	// TRACE is excluded outright: its path field holds SNR readings rather
+	// than hashes ("append SNR (Not hash!)" in Mesh.cpp), so those bytes are
+	// not identities at all and any match is coincidence.
+	if !corescope.IsFloodRoute(p.RouteType) || p.PayloadType == corescope.TypeTRACE {
+		return hits
 	}
 
 	var seen map[string]bool

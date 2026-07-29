@@ -413,6 +413,9 @@ func advertPacket(id int64, i int, at time.Time) map[string]any {
 	return map[string]any{
 		"id": id, "first_seen": at.Format(time.RFC3339),
 		"payload_type": corescope.TypeADVERT, "decoded_json": string(dj),
+		// Adverts flood, and only a flood path is a record of where a packet
+		// has actually been.
+		"route_type": corescope.RouteFlood,
 	}
 }
 
@@ -422,7 +425,11 @@ func carriedPacket(id int64, typ, i int, at time.Time) map[string]any {
 	return map[string]any{
 		"id": id, "first_seen": at.Format(time.RFC3339),
 		"payload_type": typ,
-		"_parsedPath":  []string{strings.ToUpper(key(i)[:6])},
+		// Flood: each relay appends its own hash, so the path says where the
+		// packet HAS been. A direct route's path is where it is going, and is
+		// deliberately not attributed.
+		"route_type":  corescope.RouteFlood,
+		"_parsedPath": []string{strings.ToUpper(key(i)[:6])},
 	}
 }
 

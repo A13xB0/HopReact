@@ -327,11 +327,37 @@ var AllTypes = []int{
 	TypeCONTROL, TypeRAWCustom,
 }
 
+// Route types, from MeshCore's Packet.h. The distinction between flood and
+// direct is what decides whether a path means anything.
+const (
+	RouteTransportFlood  = 0x00
+	RouteFlood           = 0x01
+	RouteDirect          = 0x02
+	RouteTransportDirect = 0x03
+)
+
+// IsFloodRoute reports whether this packet's path was BUILT UP as it
+// travelled, rather than supplied in advance.
+//
+// On a flood route each relay appends its own hash (Mesh.cpp,
+// routeRecvPacket: "append this node's hash to 'path'"), so the path is a
+// record of nodes that really did carry it.
+//
+// On a direct route the path is the route the sender chose, and each hop
+// REMOVES itself before forwarding (Mesh.cpp, removeSelfFromPath). A node
+// still listed there has not handled the packet — it is where the packet is
+// going, not where it has been.
+func IsFloodRoute(routeType int) bool {
+	return routeType == RouteTransportFlood || routeType == RouteFlood
+}
+
 // Packet is one transmission, reduced to what attribution needs.
 type Packet struct {
 	ID          int64
 	At          time.Time
 	PayloadType int
+	// RouteType decides whether PathHops is history or intent.
+	RouteType int
 	// PathHops are the route's hop hashes, lowercased, exactly as they
 	// appeared on the wire. Width varies between packets (it is declared once
 	// per packet by whoever originated it) and the attributor discards
@@ -348,6 +374,7 @@ type packetJSON struct {
 	FirstSeen   *string  `json:"first_seen"`
 	Timestamp   *string  `json:"timestamp"`
 	PayloadType *int     `json:"payload_type"`
+	RouteType   *int     `json:"route_type"`
 	ParsedPath  []string `json:"_parsedPath"`
 	DecodedJSON string   `json:"decoded_json"`
 }
@@ -451,6 +478,13 @@ func decodePacketStream(r io.Reader) ([]Packet, error) {
 			continue // nothing to attribute a type to
 		}
 		pk := Packet{ID: p.ID, PayloadType: *p.PayloadType, At: firstTime(p.FirstSeen, p.Timestamp)}
+		if p.RouteType != nil {
+			pk.RouteType = *p.RouteType
+		} else {
+			// Unknown routing can't be shown to be history, so treat it as
+			// intent and decline to attribute the path.
+			pk.RouteType = RouteDirect
+		}
 		for _, h := range p.ParsedPath {
 			// CoreScope emits these uppercase; every comparison downstream is
 			// against lowercased public keys.

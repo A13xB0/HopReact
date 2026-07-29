@@ -120,6 +120,22 @@ fieldset.types legend{padding:0 .4rem;color:var(--dim);font-size:.72rem;
   font-size:.78rem;background:#08131f}
 .tcheck:hover{border-color:#2b5183}
 .tcheck input{margin:0}
+/* How much a payload type is worth as evidence a repeater is alive. The bar
+   is on the left of the chip so the picker can be read at a glance. */
+.tcheck.q-strong{border-left:3px solid var(--good)}
+.tcheck.q-fair{border-left:3px solid var(--warn)}
+.tcheck.q-weak{border-left:3px solid var(--dim)}
+td.q-strong{border-left:3px solid var(--good);padding-left:.5rem}
+td.q-fair{border-left:3px solid var(--warn);padding-left:.5rem}
+td.q-weak{border-left:3px solid var(--dim);padding-left:.5rem}
+.src{color:var(--good);font-weight:700}
+.key-dot{display:inline-block;width:.55rem;height:.55rem;border-radius:2px;
+  vertical-align:baseline}
+.key-dot.q-strong{background:var(--good)}
+.key-dot.q-fair{background:var(--warn)}
+.key-dot.q-weak{background:var(--dim)}
+[title]{cursor:help}
+label[title],td[title]{cursor:help}
 
 /* ---------- banners ---------- */
 .banner{border-left:3px solid var(--warn);padding:.75rem .95rem;border-radius:10px;

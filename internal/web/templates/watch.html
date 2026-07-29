@@ -107,9 +107,10 @@
                 </div>
                 <div class="tgroup-types" data-group-body="e{{$rule.ID}}-{{.Name}}">
                   {{range .Types}}
-                  <label class="tcheck">
+                  <label class="tcheck q-{{typeQual .}}" title="{{typeHint .}}">
                     <input type="checkbox" name="types" value="{{.}}" {{if ruleHas $rule .}}checked{{end}}>
                     <span class="mono">{{typeName .}}</span>
+                    {{if typeFromRp .}}<span class="src" title="A repeater sends this itself">↑</span>{{end}}
                   </label>
                   {{end}}
                 </div>
@@ -257,15 +258,23 @@
         </div>
         <div class="tgroup-types" data-group-body="{{.Name}}">
           {{range .Types}}
-          <label class="tcheck">
+          <label class="tcheck q-{{typeQual .}}" title="{{typeHint .}}">
             <input type="checkbox" name="types" value="{{.}}">
             <span class="mono">{{typeName .}}</span>
+            {{if typeFromRp .}}<span class="src" title="A repeater sends this itself">↑</span>{{end}}
           </label>
           {{end}}
         </div>
       </div>
       {{end}}
     </fieldset>
+    <p class="small" style="margin:.6rem 0 0">
+      <span class="key-dot q-strong"></span> sent by the repeater itself ·
+      <span class="key-dot q-fair"></span> carried by it ·
+      <span class="key-dot q-weak"></span> says little about it.
+      <span class="src">↑</span> marks the types a repeater puts on the air rather
+      than just passing on. Hover any one for what it actually is.
+    </p>
 
     <div class="row" style="margin-top:.9rem">
       <button type="submit">Add rule</button>
@@ -360,7 +369,7 @@
            empty, and eight full-height cards saying "never" three times over
            is noise you have to scroll past to reach the real ones. */}}
       <tr {{if not $seen}}class="empty"{{end}}>
-        <td class="mono" data-label="traffic">{{.Name}}</td>
+        <td class="mono q-{{typeQual .Type}}" data-label="traffic" title="{{typeHint .Type}}">{{.Name}}{{if typeFromRp .Type}} <span class="src">↑</span>{{end}}</td>
         <td data-label="sent by it">
           {{if not .SentKnowable}}<span class="dim" title="Only adverts name their sender">—</span>
           {{else if .Sent.IsZero}}<span class="dim">never</span>

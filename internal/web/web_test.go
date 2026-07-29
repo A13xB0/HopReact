@@ -893,8 +893,7 @@ func TestTemplateAddsTheAdvertisedRule(t *testing.T) {
 		t.Errorf("source = %q, want types", got.Source)
 	}
 	want := []int{corescope.TypeRESPONSE, corescope.TypeTXTMsg, corescope.TypeACK,
-		corescope.TypeADVERT, corescope.TypeGRPTXT, corescope.TypePATH,
-		corescope.TypeTRACE, corescope.TypeCONTROL}
+		corescope.TypeADVERT, corescope.TypeGRPTXT, corescope.TypePATH}
 	if len(got.Types) != len(want) {
 		t.Fatalf("types = %v, want %v", got.Types, want)
 	}
@@ -907,9 +906,16 @@ func TestTemplateAddsTheAdvertisedRule(t *testing.T) {
 			t.Errorf("template rule is missing %s", corescope.TypeName(v))
 		}
 	}
-	// The point of the standard rule: requests are excluded.
+	// The point of the standard rule: only traffic a repeater either sends
+	// itself or genuinely carries.
 	if has[corescope.TypeREQ] || has[corescope.TypeANONReq] {
-		t.Error("the standard rule should leave the request types out")
+		t.Error("requests are aimed AT a repeater, so they say nothing about it")
+	}
+	if has[corescope.TypeTRACE] {
+		t.Error("a TRACE is a client's probe, and its path holds signal readings rather than identities")
+	}
+	if has[corescope.TypeCONTROL] {
+		t.Error("control packets never travel more than one hop, so they are rarely heard at all")
 	}
 }
 
@@ -1260,5 +1266,80 @@ func TestObserverSeesActivityFiledUnderItsNodeKey(t *testing.T) {
 	}
 	if len(all[key]) != 1 {
 		t.Errorf("AllActivity should key on the target key alone, got %+v", all)
+	}
+}
+
+// Every payload type needs a hint and a rating, or the picker shows bare
+// wire names and the user is guessing.
+func TestEveryPayloadTypeIsExplained(t *testing.T) {
+	for _, ty := range corescope.AllTypes {
+		f, ok := typeFacts[ty]
+		if !ok {
+			t.Errorf("%s has no explanation", corescope.TypeName(ty))
+			continue
+		}
+		if f.Hint == "" || f.Origin == "" {
+			t.Errorf("%s: hint or origin missing", corescope.TypeName(ty))
+		}
+		switch f.Quality {
+		case "strong", "fair", "weak":
+		default:
+			t.Errorf("%s: quality %q is not one of strong/fair/weak", corescope.TypeName(ty), f.Quality)
+		}
+	}
+}
+
+// The classification has to match the firmware, not intuition. These are the
+// ones the alerting depends on, checked against
+// examples/simple_repeater/MyMesh.cpp.
+func TestRepeaterOriginatedTypesMatchTheFirmware(t *testing.T) {
+	// A repeater composes these itself: createAdvert, createDatagram with
+	// PAYLOAD_TYPE_RESPONSE, createPathReturn, createAck, and the CLI reply
+	// TXT_MSG — plus createControlData for neighbour discovery.
+	for _, ty := range []int{corescope.TypeADVERT, corescope.TypeRESPONSE,
+		corescope.TypePATH, corescope.TypeCONTROL} {
+		if !typeFromRepeater(ty) {
+			t.Errorf("%s is sent by a repeater itself", corescope.TypeName(ty))
+		}
+	}
+	// These are aimed AT a repeater or are somebody else's traffic.
+	for _, ty := range []int{corescope.TypeREQ, corescope.TypeANONReq,
+		corescope.TypeTRACE, corescope.TypeGRPTXT, corescope.TypeGRPData} {
+		if typeFromRepeater(ty) {
+			t.Errorf("%s is not something a repeater originates", corescope.TypeName(ty))
+		}
+	}
+	// A request tells you nothing about the repeater it is addressed to.
+	for _, ty := range []int{corescope.TypeREQ, corescope.TypeANONReq, corescope.TypeTRACE} {
+		if typeQuality(ty) != "weak" {
+			t.Errorf("%s should be rated weak: it is aimed at a repeater, not sent by one",
+				corescope.TypeName(ty))
+		}
+	}
+	if typeQuality(corescope.TypeADVERT) != "strong" || typeQuality(corescope.TypeRESPONSE) != "strong" {
+		t.Error("adverts and responses are the two things a repeater says for itself")
+	}
+}
+
+// The hints have to reach the page, or the research is just a comment.
+func TestPickerCarriesHintsAndRatings(t *testing.T) {
+	srv, st, h := newServer(t)
+	cookie, _, u := signIn(t, srv, st)
+	id := addWatch(t, st, u.ID, "aa")
+
+	req := httptest.NewRequest(http.MethodGet, "/watches/"+itoa(id), nil)
+	req.AddCookie(cookie)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	body := rec.Body.String()
+
+	if !strings.Contains(body, "q-strong") || !strings.Contains(body, "q-weak") {
+		t.Error("the picker should rate each type")
+	}
+	if !strings.Contains(body, "aimed at the repeater rather than sent by it") {
+		t.Error("the REQ hint should be on the page")
+	}
+	if !strings.Contains(body, "signal readings rather than node identities") {
+		t.Error("the TRACE hint should explain why it can never identify a repeater")
 	}
 }

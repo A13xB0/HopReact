@@ -51,6 +51,7 @@ func TestAttribute(t *testing.T) {
 			// An advert names its sender outright, so it needs no path at all.
 			name: "advert attributes its originator as sent",
 			packet: corescope.Packet{
+				RouteType:   corescope.RouteFlood,
 				PayloadType: corescope.TypeADVERT, AdvertPubKey: keyAdvert,
 			},
 			want: []string{keyAdvert + "|sent"},
@@ -61,6 +62,7 @@ func TestAttribute(t *testing.T) {
 			// work as a signal for repeaters that never advertise much.
 			name: "advert also attributes its relays as carried",
 			packet: corescope.Packet{
+				RouteType:    corescope.RouteFlood,
 				PayloadType:  corescope.TypeADVERT,
 				AdvertPubKey: keyAdvert,
 				PathHops:     []string{"e426c0", "2eecdf"},
@@ -72,6 +74,7 @@ func TestAttribute(t *testing.T) {
 			// having sent it — only as having carried it.
 			name: "encrypted traffic attributes hops only, never a sender",
 			packet: corescope.Packet{
+				RouteType:   corescope.RouteFlood,
 				PayloadType: corescope.TypeRESPONSE,
 				PathHops: []string{"463f15", "630626", "39c4ba", "6edc9b",
 					"e426c0", "1360f7", "2eecdf", "04f1fe", "50480d"},
@@ -88,6 +91,7 @@ func TestAttribute(t *testing.T) {
 			// nodes, and a confident wrong attribution marks a dead node alive.
 			name: "one-byte hops are discarded even when they look unique",
 			packet: corescope.Packet{
+				RouteType:   corescope.RouteFlood,
 				PayloadType: corescope.TypeGRPTXT,
 				PathHops:    []string{"21", "90", "44", "7a", "f2"},
 			},
@@ -96,6 +100,7 @@ func TestAttribute(t *testing.T) {
 		{
 			name: "two-byte hops are discarded too",
 			packet: corescope.Packet{
+				RouteType:   corescope.RouteFlood,
 				PayloadType: corescope.TypeTXTMsg,
 				PathHops:    []string{"463f", "6306"},
 			},
@@ -106,6 +111,7 @@ func TestAttribute(t *testing.T) {
 			// about it, not two.
 			name: "a repeated hop counts once",
 			packet: corescope.Packet{
+				RouteType:   corescope.RouteFlood,
 				PayloadType: corescope.TypeTXTMsg,
 				PathHops:    []string{"e426c0", "2eecdf", "e426c0"},
 			},
@@ -113,15 +119,17 @@ func TestAttribute(t *testing.T) {
 		},
 		{
 			// Nothing to say, and nothing to crash on.
-			name:   "a packet with no path and no advert key yields nothing",
-			packet: corescope.Packet{PayloadType: corescope.TypeACK},
-			want:   nil,
+			name: "a packet with no path and no advert key yields nothing",
+			packet: corescope.Packet{RouteType: corescope.RouteFlood,
+				PayloadType: corescope.TypeACK},
+			want: nil,
 		},
 		{
 			// An advert whose key is truncated or missing must not be
 			// half-attributed to a prefix.
 			name: "an advert without a full key attributes no sender",
 			packet: corescope.Packet{
+				RouteType:   corescope.RouteFlood,
 				PayloadType: corescope.TypeADVERT, AdvertPubKey: "9bb42d96",
 			},
 			want: nil,
@@ -156,7 +164,7 @@ func TestAmbiguousPrefixResolvesToNobody(t *testing.T) {
 		t.Errorf("an unshared prefix should still resolve, got %q %v", k, ok)
 	}
 
-	p := corescope.Packet{PayloadType: corescope.TypeTXTMsg,
+	p := corescope.Packet{RouteType: corescope.RouteFlood, PayloadType: corescope.TypeTXTMsg,
 		PathHops: []string{"463f15", "630626"}}
 	got := Attribute(p, idx)
 	if len(got) != 1 || got[0].Key != key630626 {
@@ -193,5 +201,62 @@ func TestLongerHopsStillResolve(t *testing.T) {
 	idx := BuildIndex(nodes(key463f15))
 	if k, ok := idx.Lookup("463f15467c"); !ok || k != key463f15 {
 		t.Errorf("a 5-byte hop should resolve on its first 3, got %q %v", k, ok)
+	}
+}
+
+// A direct route's path is the route the SENDER chose, not a record of where
+// the packet has been — each hop removes itself before forwarding
+// (Mesh.cpp, removeSelfFromPath). A node still listed there is where the
+// packet is going. Counting it as "carried" credits a repeater for work it
+// has not done, and would keep a dead repeater looking alive purely because
+// people are still trying to route through it.
+//
+// On the live mesh this was 1,886 of 21,882 attributions, most of them REQ
+// packets on their way TO a repeater.
+func TestDirectRoutePathIsIntentNotHistory(t *testing.T) {
+	idx := BuildIndex(nodes(keyE426c0, key2eecdf))
+	hops := []string{"e426c0", "2eecdf"}
+
+	for _, rt := range []int{corescope.RouteDirect, corescope.RouteTransportDirect} {
+		got := Attribute(corescope.Packet{
+			RouteType: rt, PayloadType: corescope.TypeREQ, PathHops: hops}, idx)
+		if len(got) != 0 {
+			t.Errorf("route %d: attributed %d hops from a planned route, want 0", rt, len(got))
+		}
+	}
+	// The same path on a flood route IS history, and must still count.
+	for _, rt := range []int{corescope.RouteFlood, corescope.RouteTransportFlood} {
+		got := Attribute(corescope.Packet{
+			RouteType: rt, PayloadType: corescope.TypeREQ, PathHops: hops}, idx)
+		if len(got) != 2 {
+			t.Errorf("route %d: attributed %d hops from a built-up path, want 2", rt, len(got))
+		}
+	}
+}
+
+// An advert names its sender in the clear, so that half stands regardless of
+// how the packet was routed.
+func TestAdvertSenderSurvivesADirectRoute(t *testing.T) {
+	idx := BuildIndex(nodes(keyAdvert, keyE426c0))
+	got := Attribute(corescope.Packet{
+		RouteType: corescope.RouteDirect, PayloadType: corescope.TypeADVERT,
+		AdvertPubKey: keyAdvert, PathHops: []string{"e426c0"}}, idx)
+	if len(got) != 1 || got[0].Direction != DirSent || got[0].Key != keyAdvert {
+		t.Fatalf("got %+v, want just the sender", got)
+	}
+}
+
+// TRACE stores SNR readings in its path field rather than hashes — "append
+// SNR (Not hash!)" in Mesh.cpp. Those bytes are not identities, so any match
+// against a node prefix is coincidence and must never be recorded.
+func TestTracePathIsNeverAttributed(t *testing.T) {
+	idx := BuildIndex(nodes(keyE426c0, key2eecdf))
+	got := Attribute(corescope.Packet{
+		RouteType:   corescope.RouteFlood,
+		PayloadType: corescope.TypeTRACE,
+		// These would resolve if they were hashes. They are signal readings.
+		PathHops: []string{"e426c0", "2eecdf"}}, idx)
+	if len(got) != 0 {
+		t.Errorf("attributed %d hops from a TRACE's SNR path, want 0", len(got))
 	}
 }

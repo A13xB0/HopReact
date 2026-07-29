@@ -84,6 +84,9 @@ func New(st *store.Store, dc *discord.Client, cfg config.Config, log *slog.Logge
 		"ruleDesc":   ruleDescription,
 		"ruleHas":    ruleHasType,
 		"typeName":   corescope.TypeName,
+		"typeHint":   typeHint,
+		"typeQual":   typeQuality,
+		"typeFromRp": typeFromRepeater,
 		"add":        func(a, b int) int { return a + b },
 	}
 	pages := map[string]*template.Template{}
@@ -331,11 +334,10 @@ var ruleTemplates = []ruleTemplate{
 		ID:   "standard",
 		Kind: string(corescope.KindNode),
 		Name: "Standard",
-		Note: "Everything except requests, at 12 hours. A good default for a repeater you actually rely on.",
+		Note: "Everything a repeater either sends itself or genuinely carries, at 12 hours. Leaves out requests aimed AT the repeater, traces (which never identify one), and neighbour discovery (which never travels far enough to be heard).",
 		Types: []int{
 			corescope.TypeRESPONSE, corescope.TypeTXTMsg, corescope.TypeACK,
 			corescope.TypeADVERT, corescope.TypeGRPTXT, corescope.TypePATH,
-			corescope.TypeTRACE, corescope.TypeCONTROL,
 		},
 		Direction:      store.DirEither,
 		ThresholdHours: 12,
@@ -382,6 +384,76 @@ func templatesFor(kind string) []ruleTemplate {
 		}
 	}
 	return out
+}
+
+// typeFact describes one payload type: who puts it on the air, and how much
+// it is worth as evidence that a repeater is alive.
+//
+// Every claim here comes from the MeshCore firmware rather than from
+// guessing at names — examples/simple_repeater/MyMesh.cpp for what a repeater
+// itself sends, and src/Mesh.cpp for how each is routed.
+type typeFact struct {
+	Type int
+	// Origin is who puts this on the air in the first place.
+	Origin string
+	// FromRepeater is true when a repeater sends this ITSELF, rather than
+	// only passing on someone else's.
+	FromRepeater bool
+	// Quality rates it as a "this repeater is alive" signal.
+	Quality string // "strong" | "fair" | "weak"
+	// Hint is the hover text.
+	Hint string
+}
+
+var typeFacts = map[int]typeFact{
+	corescope.TypeADVERT: {corescope.TypeADVERT, "the node itself", true, "strong",
+		"A node announcing itself. Repeaters broadcast their own on a timer, and an advert names its sender in the clear — the only packet type that does. The strongest evidence a repeater is alive."},
+	corescope.TypeRESPONSE: {corescope.TypeRESPONSE, "the repeater, answering a request", true, "strong",
+		"A repeater's reply to a status request or login. The repeater composes this itself, so it means the box is not just powered on but answering — though it is encrypted, so we see it carried rather than sent."},
+	corescope.TypePATH: {corescope.TypePATH, "the repeater, returning a route", true, "fair",
+		"A repeater telling a client the route back to it, sent alongside a reply. Repeater-originated, but only happens when somebody is talking to it."},
+	corescope.TypeACK: {corescope.TypeACK, "whoever received a message", false, "fair",
+		"Confirmation that a message arrived. Usually from a client, though a repeater acks admin commands sent to it."},
+	corescope.TypeTXTMsg: {corescope.TypeTXTMsg, "a person, to one other person", false, "fair",
+		"A direct message between two people. A repeater normally just carries these; it only composes one when replying to an admin command."},
+	corescope.TypeGRPTXT: {corescope.TypeGRPTXT, "a person, to a channel", false, "fair",
+		"A channel message. Repeaters only pass these on, but they flood across the mesh, so carrying them is good evidence a repeater is doing its job."},
+	corescope.TypeGRPData: {corescope.TypeGRPData, "a device, to a channel", false, "weak",
+		"Data sent to a channel — telemetry and the like. Carried only, and uncommon on this mesh."},
+	corescope.TypeREQ: {corescope.TypeREQ, "a client, TO a repeater", false, "weak",
+		"Somebody asking a repeater for its status. It is addressed TO a repeater, so seeing one is not evidence the repeater answered — or even received it."},
+	corescope.TypeANONReq: {corescope.TypeANONReq, "a client, TO a repeater", false, "weak",
+		"A first-contact request to a repeater, before the two know each other. Like REQ, it is aimed at the repeater rather than sent by it."},
+	corescope.TypeTRACE: {corescope.TypeTRACE, "a client, tracing a route", false, "weak",
+		"Somebody testing a route. Not sent by the repeater, and its path field holds signal readings rather than node identities, so it can never show which repeaters were involved. Look for the RESPONSE instead."},
+	corescope.TypeCONTROL: {corescope.TypeCONTROL, "neighbouring nodes", true, "weak",
+		"Neighbour discovery. Repeaters do send these, but they never travel more than one hop, so only an observer sitting right next to the repeater will ever hear one."},
+	corescope.TypeMULTIPART: {corescope.TypeMULTIPART, "whoever sent the original", false, "weak",
+		"A fragment of something too big for one packet. Carried only, and rare."},
+	corescope.TypeRAWCustom: {corescope.TypeRAWCustom, "a custom application", false, "weak",
+		"Application-specific traffic with its own encryption. Carried only."},
+}
+
+// typeHint is the hover text for a payload type.
+func typeHint(t int) string {
+	if f, ok := typeFacts[t]; ok {
+		return f.Hint
+	}
+	return ""
+}
+
+// typeQuality rates a payload type as evidence a repeater is alive.
+func typeQuality(t int) string {
+	if f, ok := typeFacts[t]; ok {
+		return f.Quality
+	}
+	return "weak"
+}
+
+// typeFromRepeater reports whether a repeater sends this type itself, as
+// opposed to only passing on someone else's.
+func typeFromRepeater(t int) bool {
+	return typeFacts[t].FromRepeater
 }
 
 func knownType(t int) bool {
