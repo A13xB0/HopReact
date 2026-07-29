@@ -84,6 +84,17 @@ type StatusConfig struct {
 	RecentHours int `yaml:"recent_hours"`
 	RecentLimit int `yaml:"recent_limit"`
 
+	// StaleAfterDays drops anything not seen for this long from the board
+	// entirely, rather than showing a permanent red for a node nobody expects
+	// back. A status page is for things that are supposed to be working.
+	//
+	// Seven days matches CoreScope's own node retention, so a repeater
+	// disappears from here at about the point it disappears upstream. Its
+	// observer retention is 14 days, so an observer may linger a little
+	// longer there than here — which is the right way round: better to drop
+	// it from the board early than to keep a tombstone.
+	StaleAfterDays int `yaml:"stale_after_days"`
+
 	// CoreBridgeScore and CoreTrafficShare mark a repeater as backbone.
 	// Either one qualifies, because they measure different things: traffic
 	// share is how much of the mesh's traffic actually goes through a node,
@@ -238,6 +249,7 @@ func Default() Config {
 			AlarmHours:       36,
 			RecentHours:      24,
 			RecentLimit:      10,
+			StaleAfterDays:   7,
 			CoreBridgeScore:  0.2,
 			CoreTrafficShare: 0.3,
 			ServiceInterval:  time.Minute,
@@ -360,6 +372,9 @@ func (c Config) Validate() error {
 		}
 		if c.Status.RecentHours < 1 {
 			return fmt.Errorf("status.recent_hours must be at least 1, got %d", c.Status.RecentHours)
+		}
+		if c.Status.StaleAfterDays < 0 {
+			return fmt.Errorf("status.stale_after_days must not be negative (0 disables the cutoff)")
 		}
 		if c.Status.RecentLimit < 0 {
 			return fmt.Errorf("status.recent_limit must not be negative")

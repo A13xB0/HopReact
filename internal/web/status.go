@@ -122,6 +122,7 @@ type statusPage struct {
 	Late       int
 	Unknown    int
 	Total      int
+	StaleDays  int
 	QuietHrs   int
 	ConcernHrs int
 	AlarmHrs   int
@@ -228,7 +229,8 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 
 	page := statusPage{
 		Title: c.Title, Region: s.regionName(), Now: now,
-		QuietHrs: c.QuietHours, ConcernHrs: c.ConcernHours,
+		StaleDays: c.StaleAfterDays,
+		QuietHrs:  c.QuietHours, ConcernHrs: c.ConcernHours,
 		AlarmHrs: c.AlarmHours, RecentHrs: c.RecentHours,
 	}
 	fh := s.feedHealth(r)
@@ -273,8 +275,31 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		Note: "The stations listening to the mesh and reporting what they hear. These are judged on whether they check in, not on what they have heard — a quiet patch of mesh is not a broken listener.",
 	}
 
+	// Anything not seen for this long is dropped rather than shown as a
+	// permanent red. A status board is for things that are supposed to be
+	// working; a repeater nobody expects back is not an incident, it is
+	// history. CoreScope stops reporting nodes at seven days anyway.
+	var staleBefore time.Time
+	if c.StaleAfterDays > 0 {
+		staleBefore = now.AddDate(0, 0, -c.StaleAfterDays)
+	}
+	seenWithin := func(times ...time.Time) bool {
+		if staleBefore.IsZero() {
+			return true
+		}
+		for _, ts := range times {
+			if ts.After(staleBefore) {
+				return true
+			}
+		}
+		return false
+	}
+
 	for _, t := range targets {
 		if t.Kind == "observer" {
+			if !seenWithin(t.LastSeen, t.LastPacket) {
+				continue
+			}
 			// An observer is judged on its own check-in. What it has heard
 			// depends on how busy the mesh around it is, not on whether it
 			// works.
@@ -306,6 +331,9 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 			if !s.Region.Contains(*t.Lat, *t.Lon) {
 				continue
 			}
+		}
+		if !seenWithin(t.LastSeen, t.LastStandard, t.LastAdvert) {
+			continue
 		}
 		row := statusRow{Name: t.Name, Key: t.Key,
 			Status: judge(t.LastStandard, t.LastAdvert, now,

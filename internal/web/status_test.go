@@ -282,3 +282,51 @@ func contextWithTimeout(t *testing.T) context.Context {
 	t.Cleanup(cancel)
 	return ctx
 }
+
+// A repeater nobody expects back is history, not an incident. Leaving it on
+// the board as a permanent red trains people to ignore red.
+func TestLongDeadTargetsAreLeftOff(t *testing.T) {
+	srv, st, h := statusServer(t, nil)
+	srv.Cfg.Status.StaleAfterDays = 7
+	ctx := context.Background()
+	if _, err := st.UpsertTargets(ctx, []corescope.Observation{
+		{Kind: corescope.KindNode, Key: "aa", Name: "Recently Dead", Role: "repeater",
+			LastSeen: t0.Add(-48 * time.Hour)},
+		{Kind: corescope.KindNode, Key: "bb", Name: "Long Gone", Role: "repeater",
+			LastSeen: t0.Add(-30 * 24 * time.Hour)},
+		{Kind: corescope.KindObserver, Key: "cc", Name: "Ancient Observer",
+			LastSeen: t0.Add(-30 * 24 * time.Hour)},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/status", nil))
+	body := rec.Body.String()
+
+	if !strings.Contains(body, "Recently Dead") {
+		t.Error("something dead for two days is exactly what a status board is for")
+	}
+	if strings.Contains(body, "Long Gone") {
+		t.Error("a repeater gone a month should be left off")
+	}
+	if strings.Contains(body, "Ancient Observer") {
+		t.Error("the cutoff should apply to observers too")
+	}
+}
+
+// Zero means no cutoff, for anyone who wants the tombstones.
+func TestZeroStaleDaysKeepsEverything(t *testing.T) {
+	srv, st, h := statusServer(t, nil)
+	srv.Cfg.Status.StaleAfterDays = 0
+	if _, err := st.UpsertTargets(context.Background(), []corescope.Observation{
+		{Kind: corescope.KindNode, Key: "bb", Name: "Long Gone", Role: "repeater",
+			LastSeen: t0.Add(-90 * 24 * time.Hour)},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/status", nil))
+	if !strings.Contains(rec.Body.String(), "Long Gone") {
+		t.Error("with the cutoff disabled, nothing should be dropped")
+	}
+}

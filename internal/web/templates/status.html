@@ -81,6 +81,13 @@
     <span class="chip chip-bad"><i></i>not active</span> after {{$s.AlarmHrs}}h.
     Hover anything to see what its colour is based on.
   </p>
+  {{if $s.StaleDays}}
+  <p class="small" style="margin:0 0 .6rem">
+    Anything not seen for over {{$s.StaleDays}} days is left off entirely. A
+    board is for things that are meant to be working, and CoreScope stops
+    reporting a node at about the same point.
+  </p>
+  {{end}}
   <p class="small note" style="margin:0">
     <b>“No data” does not mean down.</b> A repeater is only identifiable in a
     route when that route uses hashes of three bytes or more, which is roughly
