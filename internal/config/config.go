@@ -52,6 +52,70 @@ type Config struct {
 	Discord   DiscordConfig   `yaml:"discord"`
 	Poll      PollConfig      `yaml:"poll"`
 	Alerts    AlertsConfig    `yaml:"alerts"`
+	Status    StatusConfig    `yaml:"status"`
+}
+
+// StatusConfig drives the public status board. It needs no sign-in, so
+// everything it shows is a deliberate choice rather than a default.
+type StatusConfig struct {
+	// Enabled publishes /status. Off by default: an operator should decide to
+	// put their mesh on a public page, not discover they already have.
+	Enabled bool `yaml:"enabled"`
+	// GeoJSONPath restricts the board to repeaters inside a region. Empty
+	// lists every repeater the feed carries — which on a bridged mesh can be
+	// mostly other people's, so a region is usually what you want.
+	GeoJSONPath string `yaml:"geojson_path"`
+	// RegionName overrides the name found in the GeoJSON.
+	RegionName string `yaml:"region_name"`
+	// Title heads the page.
+	Title string `yaml:"title"`
+
+	// The escalation ladder, in hours of silence. A repeater is judged on the
+	// most recent thing seen of it — an advert OR ordinary traffic — so
+	// either one arriving puts it back to green.
+	//
+	// QuietHours is worth a look, ConcernHours is worth asking about, and
+	// AlarmHours means it has almost certainly stopped.
+	QuietHours   int `yaml:"quiet_hours"`
+	ConcernHours int `yaml:"concern_hours"`
+	AlarmHours   int `yaml:"alarm_hours"`
+
+	// RecentHours and RecentLimit control the "recently changed" strip.
+	RecentHours int `yaml:"recent_hours"`
+	RecentLimit int `yaml:"recent_limit"`
+
+	// CoreBridgeScore and CoreTrafficShare mark a repeater as backbone.
+	// Either one qualifies, because they measure different things: traffic
+	// share is how much of the mesh's traffic actually goes through a node,
+	// while bridge score is betweenness centrality — how many shortest paths
+	// between other pairs of nodes run through it. A quiet chokepoint scores
+	// low on the first and high on the second, and losing it still splits the
+	// mesh in two.
+	//
+	// Defaults follow CoreScope's own labelling, where bridge >= 0.2 reads
+	// "Important" and traffic share >= 0.3 reads "Moderate". On the live mesh
+	// that picks 14 of 71 Scottish repeaters, which is about the right size
+	// for a backbone list.
+	CoreBridgeScore  float64 `yaml:"core_bridge_score"`
+	CoreTrafficShare float64 `yaml:"core_traffic_share"`
+
+	// Services are the dependencies HopReact cannot infer from packets: the
+	// MQTT broker observers report through, and whatever runs beside it.
+	Services []ServiceCheck `yaml:"services"`
+	// ServiceInterval is how often those are probed. Results are cached, so a
+	// public page never becomes a request amplifier.
+	ServiceInterval time.Duration `yaml:"service_interval"`
+}
+
+// ServiceCheck is one dependency shown on the board.
+type ServiceCheck struct {
+	Name string `yaml:"name"`
+	// Kind is "http" (the default) or "tcp".
+	Kind string `yaml:"kind"`
+	// Target is a URL for http, or host:port for tcp.
+	Target string `yaml:"target"`
+	// Note explains what it does, shown on hover.
+	Note string `yaml:"note"`
 }
 
 type SiteConfig struct {
@@ -166,6 +230,18 @@ func Default() Config {
 			PacketLimit:            600,
 			BackfillHours:          24,
 		},
+		Status: StatusConfig{
+			Enabled:          false,
+			Title:            "Repeater status",
+			QuietHours:       12,
+			ConcernHours:     24,
+			AlarmHours:       36,
+			RecentHours:      24,
+			RecentLimit:      10,
+			CoreBridgeScore:  0.2,
+			CoreTrafficShare: 0.3,
+			ServiceInterval:  time.Minute,
+		},
 		Alerts: AlertsConfig{
 			ConfirmPolls:        2,
 			MaxNewAlertsPerPoll: 10,
@@ -268,6 +344,39 @@ func (c Config) Validate() error {
 	}
 	if c.Poll.BackfillHours < 0 || c.Poll.BackfillHours > 168 {
 		return fmt.Errorf("poll.backfill_hours must be between 0 and 168, got %d", c.Poll.BackfillHours)
+	}
+	if c.Status.Enabled {
+		if c.Status.QuietHours < 1 {
+			return fmt.Errorf("status.quiet_hours must be at least 1, got %d", c.Status.QuietHours)
+		}
+		// Each tier has to be reachable, or a colour on the board is dead code.
+		if c.Status.ConcernHours <= c.Status.QuietHours {
+			return fmt.Errorf("status.concern_hours (%d) must be greater than status.quiet_hours (%d)",
+				c.Status.ConcernHours, c.Status.QuietHours)
+		}
+		if c.Status.AlarmHours <= c.Status.ConcernHours {
+			return fmt.Errorf("status.alarm_hours (%d) must be greater than status.concern_hours (%d)",
+				c.Status.AlarmHours, c.Status.ConcernHours)
+		}
+		if c.Status.RecentHours < 1 {
+			return fmt.Errorf("status.recent_hours must be at least 1, got %d", c.Status.RecentHours)
+		}
+		if c.Status.RecentLimit < 0 {
+			return fmt.Errorf("status.recent_limit must not be negative")
+		}
+		if c.Status.ServiceInterval > 0 && c.Status.ServiceInterval < 30*time.Second {
+			return fmt.Errorf("status.service_interval must be at least 30s, got %s", c.Status.ServiceInterval)
+		}
+		for i, sc := range c.Status.Services {
+			if sc.Name == "" || sc.Target == "" {
+				return fmt.Errorf("status.services[%d] needs a name and a target", i)
+			}
+			switch sc.Kind {
+			case "", "http", "tcp":
+			default:
+				return fmt.Errorf("status.services[%d].kind must be http or tcp, got %q", i, sc.Kind)
+			}
+		}
 	}
 	if c.Alerts.ConfirmPolls < 1 {
 		return fmt.Errorf("alerts.confirm_polls must be at least 1, got %d", c.Alerts.ConfirmPolls)

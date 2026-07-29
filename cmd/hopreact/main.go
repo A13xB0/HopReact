@@ -24,6 +24,8 @@ import (
 	"hopreact/internal/config"
 	"hopreact/internal/corescope"
 	"hopreact/internal/discord"
+	"hopreact/internal/geo"
+	"hopreact/internal/health"
 	"hopreact/internal/notify"
 	"hopreact/internal/poller"
 	"hopreact/internal/store"
@@ -88,10 +90,39 @@ func main() {
 		log.Warn("Discord is not configured — sign-in and alerts are disabled until discord.* is filled in")
 	}
 
+	region, err := geo.Load(cfg.Status.GeoJSONPath)
+	if err != nil {
+		// A status board configured to cover a region, that silently covers
+		// the world instead, is worse than not starting.
+		log.Error("loading the status region", "err", err)
+		os.Exit(1)
+	}
+	if region != nil {
+		log.Info("status region loaded", "name", region.Name, "polygons", region.Rings())
+	}
+
 	srv, err := web.New(st, dc, cfg, log)
 	if err != nil {
 		log.Error("building web server", "err", err)
 		os.Exit(1)
+	}
+
+	srv.Region = region
+
+	// The services the mesh depends on but that HopReact cannot infer from
+	// packets. Probed on a timer and cached, so the public board never turns
+	// into a request amplifier.
+	if cfg.Status.Enabled && len(cfg.Status.Services) > 0 {
+		checks := make([]health.Check, 0, len(cfg.Status.Services))
+		for _, sc := range cfg.Status.Services {
+			checks = append(checks, health.Check{
+				Name: sc.Name, Kind: sc.Kind, Target: sc.Target, Note: sc.Note,
+			})
+		}
+		srv.Health = &health.Monitor{
+			Checks: checks, Interval: cfg.Status.ServiceInterval,
+			Timeout: cfg.RequestTimeout(), Log: log,
+		}
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -143,6 +174,9 @@ func main() {
 			},
 		}
 		go gw.Run(ctx)
+	}
+	if srv.Health != nil {
+		go srv.Health.Run(ctx)
 	}
 	go runHousekeeping(ctx, st, log)
 

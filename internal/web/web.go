@@ -29,6 +29,8 @@ import (
 	"hopreact/internal/config"
 	"hopreact/internal/corescope"
 	"hopreact/internal/discord"
+	"hopreact/internal/geo"
+	"hopreact/internal/health"
 	"hopreact/internal/store"
 )
 
@@ -57,6 +59,11 @@ type Server struct {
 	Discord *discord.Client
 	Cfg     config.Config
 	Log     *slog.Logger
+	// Region restricts the public status board. Nil means no filter.
+	Region *geo.Region
+	// Health probes the services the board reports on. Nil is fine — the
+	// section is simply omitted.
+	Health *health.Monitor
 
 	// One template set PER PAGE, not one for everything. Each page file
 	// defines its own {{define "content"}}, and parsing them all into a
@@ -88,9 +95,10 @@ func New(st *store.Store, dc *discord.Client, cfg config.Config, log *slog.Logge
 		"typeQual":   typeQuality,
 		"typeFromRp": typeFromRepeater,
 		"add":        func(a, b int) int { return a + b },
+		"stdTypes":   statusTypeNames,
 	}
 	pages := map[string]*template.Template{}
-	for _, page := range []string{"index.html", "watches.html", "search.html", "watch.html"} {
+	for _, page := range []string{"index.html", "watches.html", "search.html", "watch.html", "status.html"} {
 		t, err := template.New(page).Funcs(funcs).
 			ParseFS(templateFS, "templates/layout.html", "templates/"+page)
 		if err != nil {
@@ -118,6 +126,7 @@ func (s *Server) Routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", s.handleIndex)
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
+	mux.HandleFunc("GET /status", s.handleStatus)
 	mux.Handle("GET /static/", http.StripPrefix("/",
 		cacheFor(time.Hour, http.FileServer(http.FS(staticFS)))))
 
@@ -272,6 +281,7 @@ type pageData struct {
 	Results    []store.Target
 	Query      string
 	FeedHealth feedHealth
+	Status     *statusPage
 	Now        time.Time
 }
 

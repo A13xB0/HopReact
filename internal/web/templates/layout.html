@@ -8,6 +8,7 @@
   --bg:#0a1929; --card:#0d2137; --border:#1e3a5f;
   --text:#e6edf5; --muted:#8fa9c0; --dim:#5f7d99;
   --good:#4ade80; --warn:#facc15; --bad:#f87171; --accent:#5865F2;
+  --amber:#facc15; --orange:#fb923c;
   --radius:12px;
 }
 *{box-sizing:border-box}
@@ -137,6 +138,64 @@ td.q-weak{border-left:3px solid var(--dim);padding-left:.5rem}
 [title]{cursor:help}
 label[title],td[title]{cursor:help}
 
+/* ---------- status board ---------- */
+.verdict{text-align:center;padding:2.4rem 1rem 2rem;margin-bottom:1.4rem}
+.verdict h1{margin:.9rem 0 .3rem;font-size:2rem;letter-spacing:-.01em;
+  text-wrap:balance}
+.verdict p{margin:0;color:var(--muted);font-size:.85rem}
+.v-mark{display:inline-flex;align-items:center;justify-content:center;
+  width:64px;height:64px;border-radius:50%;font-size:2rem;font-weight:700;
+  color:#04121d;background:var(--dim)}
+.v-good .v-mark{background:var(--good)}
+.v-amber .v-mark{background:var(--amber)}
+.v-orange .v-mark{background:var(--orange)}
+.v-bad .v-mark{background:var(--bad)}
+/* A slow pulse so a board left up on a wall still reads as live. */
+.v-good .v-mark,.v-bad .v-mark{animation:pulse 3s infinite}
+.v-good .v-mark{box-shadow:0 0 0 0 rgba(74,222,128,.45)}
+.v-bad .v-mark{box-shadow:0 0 0 0 rgba(248,113,113,.45)}
+@keyframes pulse{70%{box-shadow:0 0 0 16px rgba(0,0,0,0)}
+  100%{box-shadow:0 0 0 0 rgba(0,0,0,0)}}
+@media(prefers-reduced-motion:reduce){.v-mark{animation:none}}
+
+.grp{margin-bottom:1.6rem}
+.grp-head{display:flex;align-items:flex-start;justify-content:space-between;
+  gap:1rem;flex-wrap:wrap;margin-bottom:.6rem}
+.grp-head h2{margin:0;font-size:1.05rem;display:flex;align-items:center;gap:.5rem}
+.grp-head p{margin:.2rem 0 0;max-width:46rem}
+.grp-head h2 i{width:.6rem;height:.6rem;border-radius:50%;flex:0 0 auto}
+
+.svc-list{display:flex;flex-direction:column;gap:.5rem}
+.svc{display:grid;grid-template-columns:auto minmax(0,1fr) auto auto;
+  align-items:center;gap:.85rem;background:var(--card);
+  border:1px solid var(--border);border-radius:11px;padding:.7rem .95rem}
+.svc:hover{border-color:#2b5183}
+.svc-dot{width:.7rem;height:.7rem;border-radius:50%;flex:0 0 auto}
+.svc-name{min-width:0}
+.svc-name b{display:block;font-size:.95rem}
+.svc-name .small{display:block;margin-top:.1rem}
+.svc-age{color:var(--muted);font-size:.8rem;white-space:nowrap;
+  font-variant-numeric:tabular-nums}
+
+.s-good{background:var(--good)} .s-amber{background:var(--amber)}
+.s-orange{background:var(--orange)} .s-bad{background:var(--bad)}
+.s-muted{background:var(--dim)}
+
+.rrow{display:flex;align-items:center;gap:.6rem;flex-wrap:wrap;
+  padding:.45rem .6rem;background:#0b1c30;border:1px solid var(--border);
+  border-radius:9px}
+.rrow i{width:.6rem;height:.6rem;border-radius:50%;flex:0 0 auto}
+
+.chip{display:inline-flex;align-items:center;gap:.4rem;padding:.2rem .6rem;
+  border-radius:999px;font-size:.76rem;font-weight:700;white-space:nowrap}
+.chip i{width:.5rem;height:.5rem;border-radius:50%;background:currentColor}
+.chip-good{background:rgba(74,222,128,.14);color:var(--good)}
+.chip-amber{background:rgba(250,204,21,.16);color:var(--amber)}
+.chip-orange{background:rgba(251,146,60,.16);color:var(--orange)}
+.chip-bad{background:rgba(248,113,113,.16);color:var(--bad)}
+.chip-muted{background:rgba(143,169,192,.14);color:var(--muted)}
+.board-foot{text-align:center;margin:1.5rem 0}
+
 /* ---------- banners ---------- */
 .banner{border-left:3px solid var(--warn);padding:.75rem .95rem;border-radius:10px;
   background:rgba(250,204,21,.08);margin-bottom:1rem}
@@ -158,6 +217,14 @@ tr:last-child td{border-bottom:0}
   .node-actions form{width:100%}
   .relay-opt{max-width:none}
   .rule{grid-template-columns:1fr}
+  .verdict{padding:1.6rem .5rem 1.4rem}
+  .verdict h1{font-size:1.4rem}
+  .v-mark{width:52px;height:52px;font-size:1.6rem}
+  /* The status chip and age move under the name rather than squeezing four
+     columns into a phone. */
+  .svc{grid-template-columns:auto minmax(0,1fr);gap:.5rem .7rem}
+  .svc .chip{grid-column:2}
+  .svc-age{grid-column:2;white-space:normal}
 
   /* Tables become stacked cards. The header row goes with them, so every
      cell has to carry its own label or the values are unreadable — a column

@@ -183,8 +183,9 @@ func (s *Store) UpsertTargets(ctx context.Context, obs []corescope.Observation) 
 		ins, err := tx.PrepareContext(ctx, `
 			INSERT INTO targets (kind, key, name, role, last_seen_at, last_relayed_at,
 				relay_ever_observed_at, last_packet_at, relay_count_1h, relay_count_24h, lat, lon,
+				bridge_score, traffic_share,
 				first_indexed_at, last_in_feed_at, updated_at)
-			VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+			VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 			ON CONFLICT(kind, key) DO UPDATE SET
 				name = excluded.name,
 				role = excluded.role,
@@ -192,6 +193,8 @@ func (s *Store) UpsertTargets(ctx context.Context, obs []corescope.Observation) 
 				last_relayed_at = excluded.last_relayed_at,
 				relay_ever_observed_at = excluded.relay_ever_observed_at,
 				last_packet_at = excluded.last_packet_at,
+				bridge_score = excluded.bridge_score,
+				traffic_share = excluded.traffic_share,
 				relay_count_1h = excluded.relay_count_1h,
 				relay_count_24h = excluded.relay_count_24h,
 				lat = excluded.lat, lon = excluded.lon,
@@ -231,6 +234,7 @@ func (s *Store) UpsertTargets(ctx context.Context, obs []corescope.Observation) 
 				string(o.Kind), o.Key, o.Name, o.Role,
 				nullInt(seen), nullInt(relayed), nullInt(ever), nullInt(packet),
 				o.RelayCount1h, o.RelayCount24h, o.Lat, o.Lon,
+				o.BridgeScore, o.TrafficShare,
 				now, now, now); err != nil {
 				return err
 			}
@@ -1412,3 +1416,119 @@ func (s *Store) UsersWithWatches(ctx context.Context) ([]User, error) {
 	}
 	return out, rows.Err()
 }
+
+// ------------------------------------------------------------- status ----
+
+// StatusTarget is one repeater as the public board sees it: where it is, and
+// when it was last seen doing each of the two things the board reports on.
+type StatusTarget struct {
+	Kind string
+	Key  string
+	Name string
+	Role string
+	Lat  *float64
+	Lon  *float64
+	// BridgeScore and TrafficShare are CoreScope's structural-importance
+	// measures, used to pick out the backbone.
+	BridgeScore  float64
+	TrafficShare float64
+
+	// LastSeen is CoreScope's own figure, used only for ordering and for the
+	// "never heard of it" case.
+	LastSeen time.Time
+	// LastStandard is the newest evidence of ordinary traffic — the types a
+	// repeater either sends itself or genuinely carries.
+	LastStandard time.Time
+	// LastAdvert is the newest advert, sent or carried. Sparser than traffic
+	// but impossible to fake: an advert names its sender outright.
+	LastAdvert time.Time
+	// LastPacket is what an observer last heard, as opposed to LastSeen which
+	// is when it last checked in. Zero for nodes.
+	LastPacket time.Time
+}
+
+// StatusTargets returns every repeater with its two freshness figures, in one
+// pass rather than a query per node.
+//
+// standardTypes is the payload-type set the "traffic" column judges. Passed
+// in rather than hardcoded so the board and the Standard rule template cannot
+// drift apart.
+func (s *Store) StatusTargets(ctx context.Context, standardTypes []int) ([]StatusTarget, error) {
+	rows, err := s.read.QueryContext(ctx,
+		`SELECT kind, key, name, role, lat, lon, last_seen_at, last_packet_at,
+		        bridge_score, traffic_share
+		 FROM targets
+		 WHERE (kind = 'node' AND role IN ('repeater','room')) OR kind = 'observer'`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []StatusTarget
+	byKey := map[string]int{}
+	for rows.Next() {
+		var t StatusTarget
+		var seen, packet sql.NullInt64
+		var bridge, traffic sql.NullFloat64
+		if err := rows.Scan(&t.Kind, &t.Key, &t.Name, &t.Role, &t.Lat, &t.Lon,
+			&seen, &packet, &bridge, &traffic); err != nil {
+			return nil, err
+		}
+		t.LastSeen = timeFrom(seen)
+		t.LastPacket = timeFrom(packet)
+		t.BridgeScore, t.TrafficShare = bridge.Float64, traffic.Float64
+		// Observers and nodes can share a key; the board keeps them apart, so
+		// the activity index is keyed by both.
+		byKey[t.Kind+"|"+t.Key] = len(out)
+		out = append(out, t)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if len(out) == 0 {
+		return nil, nil
+	}
+
+	std := make(map[int]bool, len(standardTypes))
+	for _, ty := range standardTypes {
+		std[ty] = true
+	}
+
+	// One sweep of the activity table. Attribution files everything under
+	// 'node', and this only ever asks about nodes, so no kind filter is
+	// needed — see ActivityFor for why kind is not part of the key.
+	act, err := s.read.QueryContext(ctx,
+		`SELECT key, payload_type, MAX(last_at) FROM target_activity GROUP BY key, payload_type`)
+	if err != nil {
+		return nil, err
+	}
+	defer act.Close()
+	for act.Next() {
+		var key string
+		var ty int
+		var at int64
+		if err := act.Scan(&key, &ty, &at); err != nil {
+			return nil, err
+		}
+		// Attribution files everything under 'node'. An observer sharing a
+		// key with a node is the same box, so it inherits that evidence.
+		for _, kind := range []string{"node", "observer"} {
+			i, ok := byKey[kind+"|"+key]
+			if !ok {
+				continue
+			}
+			when := time.Unix(at, 0).UTC()
+			if std[ty] && when.After(out[i].LastStandard) {
+				out[i].LastStandard = when
+			}
+			if ty == advertPayloadType && when.After(out[i].LastAdvert) {
+				out[i].LastAdvert = when
+			}
+		}
+	}
+	return out, act.Err()
+}
+
+// advertPayloadType is ADVERT. Spelled out here rather than importing the
+// corescope constant, to keep the store free of that dependency.
+const advertPayloadType = 4

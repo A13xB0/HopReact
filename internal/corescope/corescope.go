@@ -92,6 +92,12 @@ type Observation struct {
 	RelayCount1h  int
 	RelayCount24h int
 	Lat, Lon      *float64
+
+	// BridgeScore and TrafficShare are CoreScope's structural-importance
+	// measures for repeaters: how many shortest paths run through this node,
+	// and how much of the mesh's traffic actually does.
+	BridgeScore  float64
+	TrafficShare float64
 }
 
 // Snapshot is everything one poll retrieved.
@@ -156,6 +162,9 @@ type nodeJSON struct {
 	RelayCount24h *int     `json:"relay_count_24h"`
 	Lat           *float64 `json:"lat"`
 	Lon           *float64 `json:"lon"`
+	BridgeScore   *float64 `json:"bridge_score"`
+	TrafficShare  *float64 `json:"traffic_share_score"`
+	Usefulness    *float64 `json:"usefulness_score"`
 }
 
 type nodesResponse struct {
@@ -191,6 +200,10 @@ func (c *Client) FetchNodes(ctx context.Context) ([]Observation, error) {
 				RelayCount24h: derefInt(n.RelayCount24h),
 				Lat:           n.Lat,
 				Lon:           n.Lon,
+				BridgeScore:   derefFloat(n.BridgeScore),
+				// CoreScope reports the same number under two names; either
+				// will do, whichever the instance happens to send.
+				TrafficShare: firstFloat(n.TrafficShare, n.Usefulness),
 			}
 			// last_seen and last_heard are the same value on the live
 			// instance, but only last_seen is guaranteed populated, so it
@@ -561,6 +574,22 @@ func deref(s *string) string {
 		return ""
 	}
 	return *s
+}
+
+func derefFloat(f *float64) float64 {
+	if f == nil {
+		return 0
+	}
+	return *f
+}
+
+func firstFloat(vals ...*float64) float64 {
+	for _, v := range vals {
+		if v != nil && *v != 0 {
+			return *v
+		}
+	}
+	return 0
 }
 
 func derefInt(i *int) int {

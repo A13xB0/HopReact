@@ -103,3 +103,72 @@ alerts:
   max_new_alert_fraction: 0.25
   # How many watches one account may hold.
   max_watches_per_user: 50
+
+# A public status board at /status. Off by default — publishing your mesh
+# should be a decision, not a surprise.
+status:
+  enabled: false
+  title: "Repeater status"
+
+  # Restrict the board to repeaters inside a region, as a GeoJSON file you
+  # mount into the container. Leave empty to list every repeater in the feed.
+  #
+  # Worth setting on a bridged mesh: of 659 repeaters on the instance this was
+  # built against, only 71 are actually in Scotland — the rest arrive over
+  # MQTT from Ireland, the Isle of Man and northern England. Without a region
+  # you are publishing mostly other people's infrastructure.
+  #
+  # Accepts a Feature, FeatureCollection, Polygon or MultiPolygon. Repeaters
+  # that advertise no location can never be placed, so they are left off.
+  geojson_path: ""
+  # Overrides the name found in the GeoJSON, if you want a friendlier one.
+  region_name: ""
+
+  # The escalation ladder, in hours of silence. A repeater is judged on the
+  # most recent thing seen of it — an advert OR traffic it passed on — so
+  # either one arriving puts it back to green.
+  #
+  # Adverts are the anchor: a repeater beacons on its own schedule whether or
+  # not anyone is using the mesh. Measured on a live mesh, a healthy repeater
+  # inside a well-covered region goes over 12h about 10% of the time and over
+  # 24h about 3%, so these are chosen to make red mean something.
+  quiet_hours: 12     # amber — worth a glance
+  concern_hours: 24   # orange — worth asking about
+  alarm_hours: 36     # red — it has almost certainly stopped
+
+  # The "gone quiet recently" strip at the top.
+  recent_hours: 24
+  recent_limit: 10
+
+  # What counts as backbone. Either measure qualifies, because they answer
+  # different questions: traffic share is how much of the mesh's traffic
+  # actually goes through a node, bridge score is how many routes across the
+  # mesh depend on it. A quiet chokepoint scores low on the first and high on
+  # the second, and losing it still splits the mesh.
+  #
+  # These follow CoreScope's own labelling (bridge >= 0.2 "Important",
+  # traffic >= 0.3 "Moderate"). On the live mesh they pick 14 of 71 Scottish
+  # repeaters — about the right size for a backbone list.
+  core_bridge_score: 0.2
+  core_traffic_share: 0.3
+
+  # Services the mesh depends on that cannot be inferred from packets.
+  # Probed on a timer and cached, so a public page never becomes a request
+  # amplifier. kind is "http" (any response under 500 counts) or "tcp" (the
+  # port accepts a connection).
+  #
+  # Note there is deliberately no MQTT probe below. The broker is not
+  # reachable from outside its own network, so a TCP check would show a
+  # permanent red for something that is working — and a status page that
+  # cries wolf is worse than one that stays quiet. The real signal for broker
+  # health is already on the board: if MQTT stops, every observer stops
+  # checking in at once, and the Observers group turns red together.
+  service_interval: 60s
+  services: []
+  #  - name: "CoreScope"
+  #    target: "https://corescope.example/api/observers"
+  #    note: "Collects and decodes the mesh traffic this page is built from."
+  #  - name: "MQTT broker"
+  #    kind: tcp
+  #    target: "broker.example:8883"
+  #    note: "Where observer stations publish everything they hear." 
