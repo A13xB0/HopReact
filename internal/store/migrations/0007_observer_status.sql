@@ -1,0 +1,15 @@
+-- Separate an observer's check-in from what it has heard.
+--
+-- These were conflated: an observer's liveness used last_packet_at in
+-- preference to last_seen, so a station that was reporting in perfectly
+-- happily but sitting somewhere quiet looked like it had died. Hearing
+-- nothing is a property of the mesh around an observer, not of the observer.
+--
+-- They really are different. On the live instance one station had checked in
+-- moments earlier while its last heard packet was 13 minutes old, and another
+-- 3 minutes against 23.
+--
+-- last_seen_at now means "last checked in" for an observer — what CoreScope's
+-- own observers page calls its last status — and this column carries what it
+-- last heard, so a rule can ask either question.
+ALTER TABLE targets ADD COLUMN last_packet_at INTEGER;

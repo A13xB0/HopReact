@@ -360,7 +360,9 @@ func (p *Poller) evaluate(ctx context.Context, now time.Time, snap corescope.Sna
 		watchUser[w.ID] = w.UserID
 		obs, known := byKey[w.TargetKind+"|"+w.TargetKey]
 		muted := !w.MutedUntil.IsZero() && now.Before(w.MutedUntil)
-		acts := activity[w.TargetKind+"|"+w.TargetKey]
+		// Keyed on the target key alone: route hops are attributed to nodes,
+		// and most observers are the same box as a node with the same key.
+		acts := activity[w.TargetKey]
 
 		for _, r := range rules[w.ID] {
 			activeSignals++
@@ -371,7 +373,8 @@ func (p *Poller) evaluate(ctx context.Context, now time.Time, snap corescope.Sna
 			cur.WatchID, cur.RuleID = w.ID, r.ID
 
 			out := alert.Evaluate(now, ruleObservation(r, obs, known, acts), cur,
-				time.Duration(r.ThresholdHours)*time.Hour, muted, pol)
+				time.Duration(r.ThresholdHours)*time.Hour,
+				alert.Prefs{Muted: muted, NotifyRecovery: w.NotifyRecovery}, pol)
 			out.State.WatchID, out.State.RuleID = w.ID, r.ID
 			if out.Entering {
 				entering++
@@ -495,6 +498,14 @@ func ruleObservation(r store.Rule, obs corescope.Observation, known bool, acts [
 			Applicable: known && !obs.LastRelayed.IsZero(),
 		}
 
+	case store.SourcePackets:
+		// An observer that has never reported a packet has not stopped doing
+		// so, and a quiet mesh is not a fault.
+		return alert.Observation{
+			At:         obs.LastPacket,
+			Applicable: known && !obs.LastPacket.IsZero(),
+		}
+
 	case store.SourceTypes:
 		want := make(map[int]bool, len(r.Types))
 		for _, t := range r.Types {
@@ -530,6 +541,8 @@ func ruleLabel(r store.Rule) string {
 		return "Not heard at all"
 	case store.SourceRelayed:
 		return "Stopped passing traffic"
+	case store.SourcePackets:
+		return "Stopped hearing traffic"
 	}
 	names := make([]string, 0, len(r.Types))
 	for _, t := range r.Types {

@@ -38,7 +38,7 @@ func run(t *testing.T, start store.WatchState, confirm int, polls []poll) (store
 		} else {
 			obs.Applicable = false
 		}
-		out := Evaluate(now, obs, cur, threshold, p.muted, pol(confirm))
+		out := Evaluate(now, obs, cur, threshold, Prefs{Muted: p.muted, NotifyRecovery: true}, pol(confirm))
 		cur = out.State
 		if out.Notify {
 			sent = append(sent, out.Kind)
@@ -199,7 +199,7 @@ func TestEnteringIsSetOnlyOnTheTransition(t *testing.T) {
 	cur := okState()
 	now := t0
 	obs := Observation{At: now.Add(-threshold - time.Minute), Applicable: true}
-	out := Evaluate(now, obs, cur, threshold, false, pol(1))
+	out := Evaluate(now, obs, cur, threshold, Prefs{NotifyRecovery: true}, pol(1))
 	if !out.Entering {
 		t.Fatal("the transition into alerting must set Entering")
 	}
@@ -207,7 +207,7 @@ func TestEnteringIsSetOnlyOnTheTransition(t *testing.T) {
 
 	now = t0.Add(5 * time.Minute)
 	obs = Observation{At: now.Add(-threshold - 6*time.Minute), Applicable: true}
-	out = Evaluate(now, obs, cur, threshold, false, pol(1))
+	out = Evaluate(now, obs, cur, threshold, Prefs{NotifyRecovery: true}, pol(1))
 	if out.Entering {
 		t.Error("staying in alerting must not count as entering")
 	}
@@ -361,5 +361,49 @@ func TestBreakerAbsoluteLimitStillAppliesWhenSmall(t *testing.T) {
 		Entering: 11, ActiveSignals: 12, MaxPerPoll: 10, MaxFraction: 0.25,
 	}); !tripped {
 		t.Error("the absolute limit must still apply below the fraction floor")
+	}
+}
+
+// Recovery messages are the other half of alerts and stay on by default, but
+// someone watching a node that flaps may want the bad news without the good.
+// Turning them off must not touch the state machine — only the message.
+func TestRecoveryMessageCanBeTurnedOff(t *testing.T) {
+	now := t0
+	threshold := 6 * time.Hour
+	cur := store.WatchState{State: store.StateAlerting, NotifyCount: 1, Since: now}
+
+	// Fresh again, so this would normally announce a recovery.
+	obs := Observation{At: now.Add(-time.Minute), Applicable: true}
+
+	on := Evaluate(now, obs, cur, threshold, Prefs{NotifyRecovery: true}, pol(1))
+	if !on.Notify || on.Kind != KindRecovered {
+		t.Fatalf("with recovery on: Notify=%v Kind=%q, want a recovery message", on.Notify, on.Kind)
+	}
+
+	off := Evaluate(now, obs, cur, threshold, Prefs{NotifyRecovery: false}, pol(1))
+	if off.Notify {
+		t.Error("with recovery off, no message should be sent")
+	}
+	// The important half: it still recovers.
+	if off.State.State != store.StateOK {
+		t.Errorf("state = %q, want ok — the preference silences the message, not the tracking", off.State.State)
+	}
+	if off.State.NotifyCount != 0 {
+		t.Errorf("NotifyCount = %d, want it reset so the next outage alerts normally", off.State.NotifyCount)
+	}
+	if !off.Changed {
+		t.Error("the state change still needs persisting")
+	}
+}
+
+// Turning recovery off must not suppress the alert itself.
+func TestRecoveryPreferenceDoesNotAffectAlerting(t *testing.T) {
+	now := t0
+	cur := store.WatchState{State: store.StateOK, Since: now}
+	obs := Observation{At: now.Add(-10 * time.Hour), Applicable: true}
+
+	out := Evaluate(now, obs, cur, 6*time.Hour, Prefs{NotifyRecovery: false}, pol(1))
+	if !out.Notify || out.Kind != KindAlert {
+		t.Errorf("Notify=%v Kind=%q, want the alert to still be sent", out.Notify, out.Kind)
 	}
 }

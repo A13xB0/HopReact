@@ -35,6 +35,16 @@ import (
 //go:embed templates/*.html
 var templateFS embed.FS
 
+// staticFS holds the handful of assets the pages load. They are served from a
+// path rather than inlined because the Content-Security-Policy is
+// default-src 'self' with no 'unsafe-inline' for scripts — an inline <script>
+// is silently blocked, which is exactly how the rule-group buttons shipped
+// doing nothing. Keeping the policy strict and the asset external is the
+// right way round.
+//
+//go:embed static/*
+var staticFS embed.FS
+
 // sessionTTL is how long a sign-in lasts.
 const sessionTTL = 30 * 24 * time.Hour
 
@@ -105,6 +115,8 @@ func (s *Server) Routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", s.handleIndex)
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
+	mux.Handle("GET /static/", http.StripPrefix("/",
+		cacheFor(time.Hour, http.FileServer(http.FS(staticFS)))))
 
 	mux.HandleFunc("GET /auth/login", s.handleLogin)
 	mux.HandleFunc("GET /auth/callback", s.handleCallback)
@@ -115,7 +127,9 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /watches/{id}", s.handleWatchDetail)
 	mux.HandleFunc("POST /watches/{id}/delete", s.handleDeleteWatch)
 	mux.HandleFunc("POST /watches/{id}/update", s.handleUpdateWatch)
+	mux.HandleFunc("POST /watches/{id}/recovery", s.handleWatchRecovery)
 	mux.HandleFunc("POST /watches/{id}/rules", s.handleAddRule)
+	mux.HandleFunc("POST /rules/{id}/update", s.handleUpdateRule)
 	mux.HandleFunc("POST /rules/{id}/delete", s.handleDeleteRule)
 	mux.HandleFunc("GET /search", s.handleSearch)
 	mux.HandleFunc("POST /account/test-dm", s.handleTestDM)
@@ -202,6 +216,17 @@ func (s *Server) requireCSRF(next http.Handler) http.Handler {
 	})
 }
 
+// cacheFor lets the browser hold a static asset for a while. Modest on
+// purpose: these are embedded in the binary, so the only way one changes is a
+// deploy, and an hour keeps a stale copy from outliving one for long.
+func cacheFor(d time.Duration, next http.Handler) http.Handler {
+	v := fmt.Sprintf("public, max-age=%d", int(d.Seconds()))
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", v)
+		next.ServeHTTP(w, r)
+	})
+}
+
 func (s *Server) securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h := w.Header()
@@ -240,6 +265,7 @@ type pageData struct {
 	Watch      *store.WatchView
 	Activity   []activityRow
 	Groups     []typeGroup
+	Templates  []ruleTemplate
 	Results    []store.Target
 	Query      string
 	FeedHealth feedHealth
@@ -266,6 +292,94 @@ var typeGroups = []typeGroup{
 	{"Routing & housekeeping", "Acknowledgements, path discovery and traces.",
 		[]int{corescope.TypeACK, corescope.TypePATH, corescope.TypeTRACE, corescope.TypeCONTROL}},
 	{"Other", "Anything custom.", []int{corescope.TypeRAWCustom}},
+}
+
+// ruleTemplate is a ready-made rule offered as one click, so the common case
+// doesn't mean ticking ten boxes.
+//
+// Defined here rather than as hidden fields in the page: the type list lives
+// in exactly one place, and a template can be adjusted later without every
+// rendered form disagreeing with the server about what it means. Applying one
+// stores the expanded types like any other rule, so changing a template never
+// rewrites what someone is already being alerted on.
+type ruleTemplate struct {
+	ID   string
+	Name string
+	Note string
+	// Kind restricts a template to one sort of target. An observer has no
+	// packet types to watch and a node has no check-in, so offering either
+	// template on the wrong page would just be a control that cannot work.
+	Kind           string
+	Source         store.Source
+	Types          []int
+	Direction      store.Direction
+	ThresholdHours int
+}
+
+var ruleTemplates = []ruleTemplate{
+	{
+		ID:     "standard-observer",
+		Name:   "Standard observer",
+		Kind:   string(corescope.KindObserver),
+		Source: store.SourceSeen,
+		Note: "Alerts if the station hasn't checked in for an hour — its last status on CoreScope. " +
+			"This is the right question for an observer: whether it has HEARD anything depends on how busy the mesh around it is, not on whether it's working.",
+		Direction:      store.DirEither,
+		ThresholdHours: 1,
+	},
+	{
+		ID:   "standard",
+		Kind: string(corescope.KindNode),
+		Name: "Standard",
+		Note: "Everything except requests, at 2 hours. A good default for a repeater you actually rely on.",
+		Types: []int{
+			corescope.TypeRESPONSE, corescope.TypeTXTMsg, corescope.TypeACK,
+			corescope.TypeADVERT, corescope.TypeGRPTXT, corescope.TypePATH,
+			corescope.TypeTRACE, corescope.TypeCONTROL,
+		},
+		Direction:      store.DirEither,
+		ThresholdHours: 2,
+	},
+	{
+		ID:             "adverts",
+		Name:           "Adverts only",
+		Note:           "The most reliable heartbeat: a node states its own key in an advert, so this never depends on route hashes. Quiet meshes suit this one.",
+		Types:          []int{corescope.TypeADVERT},
+		Direction:      store.DirEither,
+		ThresholdHours: 6,
+	},
+	{
+		ID:   "traffic",
+		Kind: string(corescope.KindNode),
+		Name: "Carrying traffic",
+		Note: "Only counts messages this node passed on for other people, which is the job a repeater is actually there to do.",
+		Types: []int{
+			corescope.TypeTXTMsg, corescope.TypeGRPTXT,
+			corescope.TypeGRPData, corescope.TypeMULTIPART,
+		},
+		Direction:      store.DirCarried,
+		ThresholdHours: 12,
+	},
+}
+
+func templateByID(id string) (ruleTemplate, bool) {
+	for _, t := range ruleTemplates {
+		if t.ID == id {
+			return t, true
+		}
+	}
+	return ruleTemplate{}, false
+}
+
+// templatesFor returns the templates that make sense for one kind of target.
+func templatesFor(kind string) []ruleTemplate {
+	var out []ruleTemplate
+	for _, t := range ruleTemplates {
+		if t.Kind == "" || t.Kind == kind {
+			out = append(out, t)
+		}
+	}
+	return out
 }
 
 func knownType(t int) bool {
@@ -335,6 +449,8 @@ func ruleDescription(r store.Rule) string {
 		return "any packet at all, as reported by CoreScope"
 	case store.SourceRelayed:
 		return "any traffic passed on, as reported by CoreScope"
+	case store.SourcePackets:
+		return "any packet heard by this observer"
 	}
 	names := make([]string, 0, len(r.Types))
 	for _, t := range r.Types {
@@ -582,6 +698,9 @@ func (s *Server) handleAddWatch(w http.ResponseWriter, r *http.Request) {
 		UserID: u.ID, TargetKind: kind, TargetKey: key,
 		ThresholdHours: hours,
 		AlertOnRelay:   r.PostFormValue("alert_on_relay") == "on",
+		// On by default: being told a node is back is the other half of being
+		// told it went away. It can be turned off per node afterwards.
+		NotifyRecovery: true,
 	}, s.Cfg.Alerts.MaxWatchesPerUser)
 
 	switch {
@@ -638,6 +757,27 @@ func (s *Server) handleUpdateWatch(w http.ResponseWriter, r *http.Request) {
 	redirectFlash(w, r, fmt.Sprintf("/watches/%d", id), msg, "ok")
 }
 
+// handleWatchRecovery toggles the "back online" message for one watch.
+func (s *Server) handleWatchRecovery(w http.ResponseWriter, r *http.Request) {
+	u, ok := userFrom(r.Context())
+	if !ok {
+		http.Redirect(w, r, "/", http.StatusSeeOther)
+		return
+	}
+	id, _ := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	on := r.PostFormValue("notify_recovery") == "on"
+	if err := s.Store.SetWatchRecovery(r.Context(), u.ID, id, on); err != nil && !errors.Is(err, store.ErrNotFound) {
+		s.Log.Error("updating recovery preference", "err", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	msg := "You'll be told when this one comes back."
+	if !on {
+		msg = "Recovery messages turned off for this one."
+	}
+	redirectFlash(w, r, fmt.Sprintf("/watches/%d", id), msg, "ok")
+}
+
 // handleWatchDetail renders one watch: its rules, and what each payload type
 // was last seen doing.
 func (s *Server) handleWatchDetail(w http.ResponseWriter, r *http.Request) {
@@ -668,6 +808,7 @@ func (s *Server) handleWatchDetail(w http.ResponseWriter, r *http.Request) {
 	d.Watch = &view
 	d.Activity = activityRows(acts)
 	d.Groups = typeGroups
+	d.Templates = templatesFor(view.Watch.TargetKind)
 	d.FeedHealth = s.feedHealth(r)
 	d.Flash, d.FlashKind = flashFrom(r)
 	s.render(w, "watch.html", d)
@@ -682,6 +823,20 @@ func (s *Server) handleAddRule(w http.ResponseWriter, r *http.Request) {
 	id, _ := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	dest := fmt.Sprintf("/watches/%d", id)
 
+	// Ownership first. Validating before this would tell someone poking at
+	// another account's watch what the form expects, and would answer
+	// differently for a watch that exists and one that doesn't.
+	watch, err := s.Store.WatchOwnedBy(r.Context(), u.ID, id)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			http.NotFound(w, r)
+			return
+		}
+		s.Log.Error("checking watch ownership", "err", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
 	hours, _ := strconv.Atoi(r.PostFormValue("threshold_hours"))
 	if hours < config.MinThresholdHours {
 		hours = config.MinThresholdHours
@@ -689,6 +844,41 @@ func (s *Server) handleAddRule(w http.ResponseWriter, r *http.Request) {
 
 	rule := store.Rule{WatchID: id, ThresholdHours: hours,
 		Label: strings.TrimSpace(r.PostFormValue("label"))}
+
+	// A template fills everything in at once. Its own threshold wins, since
+	// picking "Standard" means picking the whole thing rather than half of it
+	// combined with whatever was left in the number box.
+	if t, ok := templateByID(r.PostFormValue("template")); ok {
+		if t.Kind != "" && t.Kind != watch.TargetKind {
+			redirectFlash(w, r, dest, "That ready-made rule doesn't apply to this kind of target.", "error")
+			return
+		}
+		rule.Source = t.Source
+		if rule.Source == "" {
+			rule.Source = store.SourceTypes
+		}
+		rule.Types = t.Types
+		rule.Direction = t.Direction
+		rule.ThresholdHours = t.ThresholdHours
+		if rule.Label == "" {
+			rule.Label = t.Name
+		}
+		if _, err := s.Store.AddRule(r.Context(), u.ID, rule); err != nil {
+			s.ruleError(w, r, dest, err)
+			return
+		}
+		redirectFlash(w, r, dest, t.Name+" rule added.", "ok")
+		return
+	}
+
+	// Every rule is named. The name is what the alert message leads with, and
+	// "RESPONSE, TXT_MSG, ACK, ADVERT, GRP_TXT, PATH, TRACE, CONTROL" at three
+	// in the morning tells you far less about what to go and look at than
+	// "Ben Nevis relay" does.
+	if rule.Label == "" {
+		redirectFlash(w, r, dest, "Give the rule a name — it's what the alert will say.", "error")
+		return
+	}
 
 	switch r.PostFormValue("source") {
 	case "seen":
@@ -724,19 +914,90 @@ func (s *Server) handleAddRule(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	_, err := s.Store.AddRule(r.Context(), u.ID, rule)
+	if _, err := s.Store.AddRule(r.Context(), u.ID, rule); err != nil {
+		s.ruleError(w, r, dest, err)
+		return
+	}
+	redirectFlash(w, r, dest, "Rule added.", "ok")
+}
+
+// ruleError maps the store's rule errors onto a response, so adding through a
+// template and adding through the form fail the same way.
+func (s *Server) ruleError(w http.ResponseWriter, r *http.Request, dest string, err error) {
 	switch {
 	case errors.Is(err, store.ErrNotFound):
 		http.NotFound(w, r)
 	case errors.Is(err, store.ErrRuleLimit):
 		redirectFlash(w, r, dest,
 			fmt.Sprintf("That's the limit of %d rules on one node.", store.MaxRulesPerWatch), "error")
-	case err != nil:
-		s.Log.Error("adding rule", "err", err)
-		http.Error(w, "internal error", http.StatusInternalServerError)
 	default:
-		redirectFlash(w, r, dest, "Rule added.", "ok")
+		s.Log.Error("saving rule", "err", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
 	}
+}
+
+// handleUpdateRule edits a rule in place, keeping its alert state — see
+// store.UpdateRule for why that matters.
+func (s *Server) handleUpdateRule(w http.ResponseWriter, r *http.Request) {
+	u, ok := userFrom(r.Context())
+	if !ok {
+		http.Redirect(w, r, "/", http.StatusSeeOther)
+		return
+	}
+	ruleID, _ := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	dest := "/watches"
+	if v := strings.TrimSpace(r.PostFormValue("watch_id")); v != "" {
+		if wid, err := strconv.ParseInt(v, 10, 64); err == nil {
+			dest = fmt.Sprintf("/watches/%d", wid)
+		}
+	}
+
+	hours, _ := strconv.Atoi(r.PostFormValue("threshold_hours"))
+	if hours < config.MinThresholdHours {
+		hours = config.MinThresholdHours
+	}
+	rule := store.Rule{
+		ID: ruleID, ThresholdHours: hours,
+		Label: strings.TrimSpace(r.PostFormValue("label")),
+	}
+	if rule.Label == "" {
+		redirectFlash(w, r, dest, "A rule needs a name — it's what the alert will say.", "error")
+		return
+	}
+	switch d := r.PostFormValue("direction"); d {
+	case "sent", "carried":
+		rule.Direction = store.Direction(d)
+	default:
+		rule.Direction = store.DirEither
+	}
+
+	// A rule reading one of CoreScope's own aggregates has no type list to
+	// edit; only its threshold and name are adjustable.
+	editingTypes := r.PostFormValue("source") == "" || r.PostFormValue("source") == string(store.SourceTypes)
+	if editingTypes {
+		if err := r.ParseForm(); err == nil {
+			seen := map[int]bool{}
+			for _, v := range r.PostForm["types"] {
+				n, err := strconv.Atoi(v)
+				if err != nil || seen[n] || !knownType(n) {
+					continue
+				}
+				seen[n] = true
+				rule.Types = append(rule.Types, n)
+			}
+		}
+		sort.Ints(rule.Types)
+		if len(rule.Types) == 0 {
+			redirectFlash(w, r, dest, "A rule needs at least one kind of traffic.", "error")
+			return
+		}
+	}
+
+	if err := s.Store.UpdateRule(r.Context(), u.ID, rule); err != nil {
+		s.ruleError(w, r, dest, err)
+		return
+	}
+	redirectFlash(w, r, dest, "Rule updated.", "ok")
 }
 
 func (s *Server) handleDeleteRule(w http.ResponseWriter, r *http.Request) {

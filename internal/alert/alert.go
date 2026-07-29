@@ -75,13 +75,25 @@ const (
 	KindRecovered = "recovered"
 )
 
+// Prefs are the watcher's own choices, as opposed to Policy's service-wide
+// tuning. Both suppress messages without suppressing state: a watch always
+// tracks reality, it just may not shout about it.
+type Prefs struct {
+	// Muted silences everything for now.
+	Muted bool
+	// NotifyRecovery controls the "back online" message. The alert itself is
+	// unaffected — someone can want to hear about failures and not about
+	// their resolution, particularly for a node that flaps.
+	NotifyRecovery bool
+}
+
 // Evaluate advances one watch signal by one poll.
 //
 // now is the evaluation time, obs is what the poll saw, cur is the stored
-// state, threshold is the user's chosen silence, and muted suppresses
-// notification (but not state movement — a muted watch still tracks reality,
-// it just doesn't shout about it).
-func Evaluate(now time.Time, obs Observation, cur store.WatchState, threshold time.Duration, muted bool, pol Policy) Outcome {
+// state, threshold is the user's chosen silence, and prefs carries their
+// messaging choices.
+func Evaluate(now time.Time, obs Observation, cur store.WatchState, threshold time.Duration, prefs Prefs, pol Policy) Outcome {
+	muted := prefs.Muted
 	confirm := pol.ConfirmPolls
 	if confirm < 1 {
 		confirm = 1
@@ -161,7 +173,7 @@ func Evaluate(now time.Time, obs Observation, cur store.WatchState, threshold ti
 		next.Since = now
 		next.Consecutive = 1
 		if next.Consecutive >= confirm {
-			return recover_(next, now, muted)
+			return recover_(next, now, muted, prefs.NotifyRecovery)
 		}
 		return Outcome{State: next, Changed: true}
 
@@ -177,7 +189,7 @@ func Evaluate(now time.Time, obs Observation, cur store.WatchState, threshold ti
 		}
 		next.Consecutive = cur.Consecutive + 1
 		if next.Consecutive >= confirm {
-			return recover_(next, now, muted)
+			return recover_(next, now, muted, prefs.NotifyRecovery)
 		}
 		return Outcome{State: next, Changed: true}
 	}
@@ -206,7 +218,7 @@ func promote(next store.WatchState, now time.Time, muted bool) Outcome {
 	return Outcome{State: next, Changed: true, Notify: true, Kind: KindAlert, Entering: true}
 }
 
-func recover_(next store.WatchState, now time.Time, muted bool) Outcome {
+func recover_(next store.WatchState, now time.Time, muted, notifyRecovery bool) Outcome {
 	wasAnnounced := next.NotifyCount > 0
 	next.State = store.StateOK
 	next.Since = now
@@ -214,10 +226,12 @@ func recover_(next store.WatchState, now time.Time, muted bool) Outcome {
 	next.AlertingSince = time.Time{}
 	next.NotifyCount = 0
 	next.Seeded = false
-	if muted || !wasAnnounced {
-		// Nothing was ever announced for this episode — a seeded watch, or
-		// a muted one — so announcing the recovery would be the first the
-		// user heard of any of it.
+	if muted || !wasAnnounced || !notifyRecovery {
+		// Either nothing was ever announced for this episode — a seeded
+		// watch, or a muted one, so announcing the recovery would be the
+		// first the user heard of any of it — or they have asked not to be
+		// told about recoveries at all. The state still moves; only the
+		// message is withheld.
 		return Outcome{State: next, Changed: true}
 	}
 	next.LastNotified = now

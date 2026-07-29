@@ -48,7 +48,11 @@
         <div class="row" style="justify-content:flex-end">
           <label class="field">
             Tell me after
-            <input type="number" name="threshold_hours" min="1" max="720" value="6"
+            {{/* An observer checks in on a schedule of its own, so an hour of
+                 silence from one already means something is wrong. A node is
+                 judged on mesh traffic, which is far lumpier. */}}
+            <input type="number" name="threshold_hours" min="1" max="720"
+                   value="{{if eq .Kind "observer"}}1{{else}}6{{end}}"
                    aria-label="Hours of silence before you are alerted">
             hours of silence
           </label>

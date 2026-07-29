@@ -174,7 +174,7 @@ func (s *Store) UpsertTargets(ctx context.Context, obs []corescope.Observation) 
 	now := s.Now().UTC().Unix()
 	err = s.tx(ctx, func(tx *sql.Tx) error {
 		sel, err := tx.PrepareContext(ctx,
-			`SELECT last_seen_at, last_relayed_at, relay_ever_observed_at FROM targets WHERE kind = ? AND key = ?`)
+			`SELECT last_seen_at, last_relayed_at, relay_ever_observed_at, last_packet_at FROM targets WHERE kind = ? AND key = ?`)
 		if err != nil {
 			return err
 		}
@@ -182,15 +182,16 @@ func (s *Store) UpsertTargets(ctx context.Context, obs []corescope.Observation) 
 
 		ins, err := tx.PrepareContext(ctx, `
 			INSERT INTO targets (kind, key, name, role, last_seen_at, last_relayed_at,
-				relay_ever_observed_at, relay_count_1h, relay_count_24h, lat, lon,
+				relay_ever_observed_at, last_packet_at, relay_count_1h, relay_count_24h, lat, lon,
 				first_indexed_at, last_in_feed_at, updated_at)
-			VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+			VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 			ON CONFLICT(kind, key) DO UPDATE SET
 				name = excluded.name,
 				role = excluded.role,
 				last_seen_at = excluded.last_seen_at,
 				last_relayed_at = excluded.last_relayed_at,
 				relay_ever_observed_at = excluded.relay_ever_observed_at,
+				last_packet_at = excluded.last_packet_at,
 				relay_count_1h = excluded.relay_count_1h,
 				relay_count_24h = excluded.relay_count_24h,
 				lat = excluded.lat, lon = excluded.lon,
@@ -202,9 +203,9 @@ func (s *Store) UpsertTargets(ctx context.Context, obs []corescope.Observation) 
 		defer ins.Close()
 
 		for _, o := range obs {
-			var prevSeen, prevRelayed, prevEver sql.NullInt64
+			var prevSeen, prevRelayed, prevEver, prevPacket sql.NullInt64
 			switch err := sel.QueryRowContext(ctx, string(o.Kind), o.Key).
-				Scan(&prevSeen, &prevRelayed, &prevEver); {
+				Scan(&prevSeen, &prevRelayed, &prevEver, &prevPacket); {
 			case errors.Is(err, sql.ErrNoRows):
 				// first sighting
 			case err != nil:
@@ -213,6 +214,7 @@ func (s *Store) UpsertTargets(ctx context.Context, obs []corescope.Observation) 
 
 			seen := maxTime(timeFrom(prevSeen), o.LastSeen)
 			relayed := maxTime(timeFrom(prevRelayed), o.LastRelayed)
+			packet := maxTime(timeFrom(prevPacket), o.LastPacket)
 			if !timeFrom(prevSeen).IsZero() && seen.After(timeFrom(prevSeen)) {
 				advanced++
 			}
@@ -227,7 +229,7 @@ func (s *Store) UpsertTargets(ctx context.Context, obs []corescope.Observation) 
 
 			if _, err := ins.ExecContext(ctx,
 				string(o.Kind), o.Key, o.Name, o.Role,
-				nullInt(seen), nullInt(relayed), nullInt(ever),
+				nullInt(seen), nullInt(relayed), nullInt(ever), nullInt(packet),
 				o.RelayCount1h, o.RelayCount24h, o.Lat, o.Lon,
 				now, now, now); err != nil {
 				return err
@@ -239,20 +241,21 @@ func (s *Store) UpsertTargets(ctx context.Context, obs []corescope.Observation) 
 }
 
 const targetCols = `kind, key, name, role, last_seen_at, last_relayed_at,
-	relay_ever_observed_at, relay_count_1h, relay_count_24h, lat, lon,
+	relay_ever_observed_at, last_packet_at, relay_count_1h, relay_count_24h, lat, lon,
 	first_indexed_at, last_in_feed_at, updated_at`
 
 func scanTarget(row interface{ Scan(...any) error }) (Target, error) {
 	var t Target
-	var seen, relayed, ever sql.NullInt64
+	var seen, relayed, ever, packet sql.NullInt64
 	var first, feed, updated int64
-	if err := row.Scan(&t.Kind, &t.Key, &t.Name, &t.Role, &seen, &relayed, &ever,
+	if err := row.Scan(&t.Kind, &t.Key, &t.Name, &t.Role, &seen, &relayed, &ever, &packet,
 		&t.RelayCount1h, &t.RelayCount24h, &t.Lat, &t.Lon, &first, &feed, &updated); err != nil {
 		return Target{}, err
 	}
 	t.LastSeen = timeFrom(seen)
 	t.LastRelayed = timeFrom(relayed)
 	t.RelayEverObserved = timeFrom(ever)
+	t.LastPacket = timeFrom(packet)
 	t.FirstIndexedAt = time.Unix(first, 0).UTC()
 	t.LastInFeedAt = time.Unix(feed, 0).UTC()
 	t.UpdatedAt = time.Unix(updated, 0).UTC()
@@ -333,8 +336,11 @@ var ErrDuplicateWatch = errors.New("store: already watching this target")
 // cannot be starved by a run of narrow hop widths.
 func DefaultRules(kind string, thresholdHours int, alertOnRelay bool) []Rule {
 	if kind == string(corescope.KindObserver) {
+		// An observer's own check-in, not what it has heard. Whether it hears
+		// anything depends on how busy the mesh around it is; whether it
+		// checks in depends on whether it is working.
 		return []Rule{{
-			Label: "Not heard at all", Source: SourceSeen,
+			Label: "Stopped checking in", Source: SourceSeen,
 			Direction: DirEither, ThresholdHours: thresholdHours,
 		}}
 	}
@@ -406,10 +412,11 @@ func (s *Store) CreateWatch(ctx context.Context, w Watch, maxPerUser int) (int64
 
 		res, err := tx.ExecContext(ctx, `
 			INSERT INTO watches (user_id, target_kind, target_key, threshold_hours,
-				alert_on_relay, label, muted_until, created_at)
-			VALUES (?,?,?,?,?,?,?,?)`,
+				alert_on_relay, label, muted_until, notify_recovery, created_at)
+			VALUES (?,?,?,?,?,?,?,?,?)`,
 			w.UserID, w.TargetKind, strings.ToLower(w.TargetKey), w.ThresholdHours,
-			boolInt(w.AlertOnRelay), nullString(w.Label), nullInt(w.MutedUntil), now.Unix())
+			boolInt(w.AlertOnRelay), nullString(w.Label), nullInt(w.MutedUntil),
+			boolInt(w.NotifyRecovery), now.Unix())
 		if err != nil {
 			if strings.Contains(err.Error(), "UNIQUE") {
 				return ErrDuplicateWatch
@@ -508,6 +515,15 @@ func ruleSeedObservation(ctx context.Context, tx *sql.Tx, kind, key string, r Ru
 		// A node that has never relayed has not stopped relaying.
 		return timeFrom(relayed), !timeFrom(ever).IsZero(), nil
 
+	case SourcePackets:
+		var at sql.NullInt64
+		err := tx.QueryRowContext(ctx,
+			`SELECT last_packet_at FROM targets WHERE kind = ? AND key = ?`, kind, key).Scan(&at)
+		if errors.Is(err, sql.ErrNoRows) {
+			return time.Time{}, false, nil
+		}
+		return timeFrom(at), err == nil && at.Valid, err
+
 	case SourceTypes:
 		q, args := activityQuery(kind, key, r)
 		if q == "" {
@@ -529,14 +545,16 @@ func activityQuery(kind, key string, r Rule) (string, []any) {
 	if len(r.Types) == 0 {
 		return "", nil
 	}
-	args := []any{kind, key}
+	args := []any{key}
 	ph := make([]string, len(r.Types))
 	for i, t := range r.Types {
 		ph[i] = "?"
 		args = append(args, t)
 	}
+	// Keyed on key alone, matching ActivityFor — an observer that is also a
+	// repeater must see its own relayed traffic.
 	q := `SELECT MAX(last_at) FROM target_activity
-	      WHERE kind = ? AND key = ? AND payload_type IN (` + strings.Join(ph, ",") + `)`
+	      WHERE key = ? AND payload_type IN (` + strings.Join(ph, ",") + `)`
 	if r.Direction == DirSent || r.Direction == DirCarried {
 		q += ` AND direction = ?`
 		args = append(args, string(r.Direction))
@@ -547,6 +565,22 @@ func activityQuery(kind, key string, r Rule) (string, []any) {
 func (s *Store) DeleteWatch(ctx context.Context, userID, watchID int64) error {
 	return s.tx(ctx, func(tx *sql.Tx) error {
 		res, err := tx.ExecContext(ctx, `DELETE FROM watches WHERE id = ? AND user_id = ?`, watchID, userID)
+		if err != nil {
+			return err
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			return ErrNotFound
+		}
+		return nil
+	})
+}
+
+// SetWatchRecovery chooses whether this watch announces recoveries.
+func (s *Store) SetWatchRecovery(ctx context.Context, userID, watchID int64, on bool) error {
+	return s.tx(ctx, func(tx *sql.Tx) error {
+		res, err := tx.ExecContext(ctx,
+			`UPDATE watches SET notify_recovery = ? WHERE id = ? AND user_id = ?`,
+			boolInt(on), watchID, userID)
 		if err != nil {
 			return err
 		}
@@ -624,6 +658,33 @@ func (s *Store) AddRule(ctx context.Context, userID int64, r Rule) (int64, error
 		return err
 	})
 	return id, err
+}
+
+// UpdateRule changes an existing rule in place, keeping its alert state.
+//
+// State is deliberately kept rather than reset. Widening or narrowing a rule
+// does not mean the node's history stops counting, and the next poll
+// re-derives everything anyway: if the new type set has no evidence the
+// evaluator drops it to unknown on its own, and if the threshold moved the
+// state machine picks that up the same way it picks up anything else.
+// Wiping notify_count here would be actively wrong — a node already alerting
+// would announce itself a second time just because someone adjusted a
+// threshold.
+func (s *Store) UpdateRule(ctx context.Context, userID int64, r Rule) error {
+	return s.tx(ctx, func(tx *sql.Tx) error {
+		res, err := tx.ExecContext(ctx, `
+			UPDATE watch_rules SET label = ?, types = ?, direction = ?, threshold_hours = ?
+			WHERE id = ? AND watch_id IN (SELECT id FROM watches WHERE user_id = ?)`,
+			r.Label, encodeTypes(r.Types), string(r.Direction), r.ThresholdHours,
+			r.ID, userID)
+		if err != nil {
+			return err
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			return ErrNotFound
+		}
+		return nil
+	})
 }
 
 // DeleteRule removes one rule. Its state goes with it by cascade.
@@ -717,12 +778,19 @@ func (s *Store) UpsertActivity(ctx context.Context, tx *sql.Tx, kind, key string
 	return err
 }
 
-// ActivityFor returns every per-type row recorded for one target.
+// ActivityFor returns every per-type row recorded for one key.
+//
+// Deliberately ignores kind. Attribution files everything under 'node',
+// because a route hop is a node identity — but 7 of the 9 observers on the
+// live instance ARE nodes, sharing the same 64-hex key, and several of them
+// relay. Keying the lookup on kind as well would hide a repeater's own
+// traffic from the observer watch on the very same box.
 func (s *Store) ActivityFor(ctx context.Context, kind, key string) ([]Activity, error) {
 	rows, err := s.read.QueryContext(ctx, `
-		SELECT payload_type, direction, last_at, evidence_count
-		FROM target_activity WHERE kind = ? AND key = ?
-		ORDER BY payload_type`, kind, strings.ToLower(key))
+		SELECT payload_type, direction, MAX(last_at), SUM(evidence_count)
+		FROM target_activity WHERE key = ?
+		GROUP BY payload_type, direction
+		ORDER BY payload_type`, strings.ToLower(key))
 	if err != nil {
 		return nil, err
 	}
@@ -742,28 +810,44 @@ func (s *Store) ActivityFor(ctx context.Context, kind, key string) ([]Activity, 
 	return out, rows.Err()
 }
 
-// AllActivity returns every activity row keyed by "kind|key", which is what
-// the evaluator needs to judge per-type rules without an N+1 query.
+// AllActivity returns every activity row keyed by target KEY, not by
+// (kind, key). See ActivityFor: a route hop is always attributed to a node,
+// and most observers are the same physical box as a node with the same key,
+// so keying on kind would hide a repeater's traffic from the observer watch
+// sitting on it.
 func (s *Store) AllActivity(ctx context.Context) (map[string][]Activity, error) {
 	rows, err := s.read.QueryContext(ctx,
-		`SELECT kind, key, payload_type, direction, last_at, evidence_count FROM target_activity`)
+		`SELECT key, payload_type, direction, MAX(last_at), SUM(evidence_count)
+		 FROM target_activity GROUP BY key, payload_type, direction`)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	out := map[string][]Activity{}
 	for rows.Next() {
-		var kind, key, dir string
+		var key, dir string
 		var a Activity
 		var at int64
-		if err := rows.Scan(&kind, &key, &a.PayloadType, &dir, &at, &a.EvidenceCount); err != nil {
+		if err := rows.Scan(&key, &a.PayloadType, &dir, &at, &a.EvidenceCount); err != nil {
 			return nil, err
 		}
 		a.Direction = Direction(dir)
 		a.LastAt = time.Unix(at, 0).UTC()
-		out[kind+"|"+key] = append(out[kind+"|"+key], a)
+		out[key] = append(out[key], a)
 	}
 	return out, rows.Err()
+}
+
+// KeyIsAlsoNode reports whether this key is known as a mesh node as well.
+// True for 7 of the 9 observers on the live instance — the same box doing
+// both jobs — and that is what decides whether per-type rules can say
+// anything useful about an observer.
+func (s *Store) KeyIsAlsoNode(ctx context.Context, key string) (bool, error) {
+	var n int
+	err := s.read.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM targets WHERE kind = 'node' AND key = ?`,
+		strings.ToLower(key)).Scan(&n)
+	return n > 0, err
 }
 
 // Cursor is how far through the packet feed we have read. Low and High are
@@ -844,18 +928,19 @@ func decodeTypes(s string) []int {
 }
 
 const watchCols = `id, user_id, target_kind, target_key, threshold_hours,
-	alert_on_relay, COALESCE(label,''), muted_until, created_at`
+	alert_on_relay, COALESCE(label,''), muted_until, notify_recovery, created_at`
 
 func scanWatch(row interface{ Scan(...any) error }) (Watch, error) {
 	var w Watch
-	var relay int
+	var relay, recovery int
 	var muted sql.NullInt64
 	var created int64
 	if err := row.Scan(&w.ID, &w.UserID, &w.TargetKind, &w.TargetKey, &w.ThresholdHours,
-		&relay, &w.Label, &muted, &created); err != nil {
+		&relay, &w.Label, &muted, &recovery, &created); err != nil {
 		return Watch{}, err
 	}
 	w.AlertOnRelay = relay != 0
+	w.NotifyRecovery = recovery != 0
 	w.MutedUntil = timeFrom(muted)
 	w.CreatedAt = time.Unix(created, 0).UTC()
 	return w, nil
@@ -1274,6 +1359,14 @@ func (s *Store) WatchViewByID(ctx context.Context, userID, watchID int64) (Watch
 		v.Target = &tCopy
 	} else if !errors.Is(err, ErrNotFound) {
 		return WatchView{}, err
+	}
+
+	if w.TargetKind == string(corescope.KindObserver) {
+		if also, err := s.KeyIsAlsoNode(ctx, w.TargetKey); err == nil {
+			v.AlsoNode = also
+		} else {
+			return WatchView{}, err
+		}
 	}
 	return v, nil
 }

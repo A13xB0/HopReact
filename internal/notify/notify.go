@@ -203,8 +203,9 @@ func line(p poller.AlertPayload) string {
 		kind = "observer"
 	}
 	if p.Kind == "recovered" {
-		if len(p.Rules) == 1 {
-			return fmt.Sprintf("• **%s** (%s) — %s: seen again\n", name, kind, p.Rules[0].Label)
+		if len(p.Rules) == 1 && strings.TrimSpace(p.Rules[0].Label) != "" {
+			return fmt.Sprintf("• **%s** (%s) — rule **%s** is happy again\n",
+				name, kind, p.Rules[0].Label)
 		}
 		return fmt.Sprintf("• **%s** (%s) — seen again\n", name, kind)
 	}
@@ -212,17 +213,21 @@ func line(p poller.AlertPayload) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "• **%s** (%s)\n", name, kind)
 	for _, r := range p.Rules {
+		// Name the rule that actually tripped. A node can carry several with
+		// different thresholds watching different traffic, so "it went quiet"
+		// on its own doesn't say what to go and look at.
 		label := r.Label
 		if strings.TrimSpace(label) == "" {
-			label = "no activity"
+			label = "unnamed rule"
 		}
 		if r.LastSeenUnix == 0 {
-			fmt.Fprintf(&b, "    ◦ %s — nothing seen, threshold %dh\n", label, r.ThresholdHours)
+			fmt.Fprintf(&b, "    ◦ rule **%s** — nothing seen at all (threshold %dh)\n",
+				label, r.ThresholdHours)
 			continue
 		}
 		last := time.Unix(r.LastSeenUnix, 0).UTC()
-		fmt.Fprintf(&b, "    ◦ %s — last %s (threshold %dh)\n",
-			label, last.Format("2006-01-02 15:04 UTC"), r.ThresholdHours)
+		fmt.Fprintf(&b, "    ◦ rule **%s** — nothing for %dh, last seen %s\n",
+			label, r.ThresholdHours, last.Format("2006-01-02 15:04 UTC"))
 	}
 	return b.String()
 }

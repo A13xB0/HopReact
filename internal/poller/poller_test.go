@@ -144,6 +144,7 @@ func (h *harness) watch(t *testing.T, key string, hours int) int64 {
 	}
 	id, err := h.st.CreateWatch(context.Background(), store.Watch{
 		UserID: u.ID, TargetKind: "node", TargetKey: key, ThresholdHours: hours,
+		NotifyRecovery: true,
 	}, 50)
 	if err != nil {
 		t.Fatal(err)

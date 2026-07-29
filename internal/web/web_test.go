@@ -462,6 +462,7 @@ func addWatch(t *testing.T, st *store.Store, userID int64, key string) int64 {
 	t.Helper()
 	id, err := st.CreateWatch(context.Background(), store.Watch{
 		UserID: userID, TargetKind: "node", TargetKey: key, ThresholdHours: 6,
+		NotifyRecovery: true,
 	}, 50)
 	if err != nil {
 		t.Fatal(err)
@@ -736,5 +737,528 @@ func TestSuspectFeedShowsItsReason(t *testing.T) {
 
 	if !strings.Contains(rec.Body.String(), "below the floor of 100") {
 		t.Error("a suspect poll's human-readable reason should be shown")
+	}
+}
+
+// --------------------------------------------------- editing & templates --
+
+func postForm(t *testing.T, h http.Handler, cookie *http.Cookie, path string, form url.Values) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.AddCookie(cookie)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	return rec
+}
+
+func ruleByLabel(t *testing.T, st *store.Store, watchID int64, label string) store.Rule {
+	t.Helper()
+	rules, err := st.RulesForWatch(context.Background(), watchID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range rules {
+		if r.Label == label {
+			return r
+		}
+	}
+	t.Fatalf("no rule labelled %q on watch %d", label, watchID)
+	return store.Rule{}
+}
+
+func TestEditRuleChangesItInPlace(t *testing.T) {
+	srv, st, h := newServer(t)
+	ctx := context.Background()
+	cookie, csrf, u := signIn(t, srv, st)
+	id := addWatch(t, st, u.ID, "aa")
+
+	rec := postForm(t, h, cookie, "/watches/"+itoa(id)+"/rules", url.Values{
+		"csrf_token": {csrf}, "threshold_hours": {"6"}, "direction": {"either"},
+		"label": {"Mine"}, "types": {"4", "5"},
+	})
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("adding: status %d", rec.Code)
+	}
+	before := ruleByLabel(t, st, id, "Mine")
+
+	rec = postForm(t, h, cookie, "/rules/"+itoa(before.ID)+"/update", url.Values{
+		"csrf_token": {csrf}, "watch_id": {itoa(id)},
+		"threshold_hours": {"2"}, "direction": {"carried"},
+		"label": {"Mine"}, "types": {"1", "2", "4"},
+	})
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("editing: status %d", rec.Code)
+	}
+
+	after := ruleByLabel(t, st, id, "Mine")
+	if after.ID != before.ID {
+		t.Errorf("editing replaced the rule (%d -> %d) instead of changing it", before.ID, after.ID)
+	}
+	if after.ThresholdHours != 2 {
+		t.Errorf("threshold = %d, want 2", after.ThresholdHours)
+	}
+	if after.Direction != store.DirCarried {
+		t.Errorf("direction = %q, want carried", after.Direction)
+	}
+	if len(after.Types) != 3 || after.Types[0] != 1 || after.Types[2] != 4 {
+		t.Errorf("types = %v, want [1 2 4]", after.Types)
+	}
+	if n, _ := st.RulesForWatch(ctx, id); len(n) != 3 {
+		t.Errorf("watch has %d rules, want the 2 defaults plus the edited one", len(n))
+	}
+}
+
+// Editing a threshold must not re-announce an outage the user already knows
+// about, so the rule's alert state has to survive the edit.
+func TestEditingARuleKeepsItsAlertState(t *testing.T) {
+	srv, st, h := newServer(t)
+	ctx := context.Background()
+	cookie, csrf, u := signIn(t, srv, st)
+	id := addWatch(t, st, u.ID, "aa")
+	rule := ruleByLabel(t, st, id, "Not heard at all")
+
+	if err := st.WriteTx(ctx, func(tx *sql.Tx) error {
+		return st.SaveWatchState(ctx, tx, store.WatchState{
+			WatchID: id, RuleID: rule.ID, State: store.StateAlerting,
+			Since: t0, NotifyCount: 1,
+		})
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := postForm(t, h, cookie, "/rules/"+itoa(rule.ID)+"/update", url.Values{
+		"csrf_token": {csrf}, "watch_id": {itoa(id)},
+		"threshold_hours": {"2"}, "source": {"seen"}, "label": {"Not heard at all"},
+	})
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("status %d", rec.Code)
+	}
+
+	states, _ := st.AllWatchState(ctx)
+	got := states[id][rule.ID]
+	if got.State != store.StateAlerting {
+		t.Errorf("state = %q, want it kept across the edit", got.State)
+	}
+	if got.NotifyCount != 1 {
+		t.Errorf("NotifyCount = %d, want 1 — otherwise the outage is announced twice", got.NotifyCount)
+	}
+	if r := ruleByLabel(t, st, id, "Not heard at all"); r.ThresholdHours != 2 {
+		t.Errorf("threshold = %d, want 2", r.ThresholdHours)
+	}
+}
+
+// A rule reading one of CoreScope's own figures has no type list. Editing it
+// must not blank it into a rule that matches nothing.
+func TestEditingAFeedRuleKeepsItsSource(t *testing.T) {
+	srv, st, h := newServer(t)
+	cookie, csrf, u := signIn(t, srv, st)
+	id := addWatch(t, st, u.ID, "aa")
+	rule := ruleByLabel(t, st, id, "Not heard at all")
+
+	postForm(t, h, cookie, "/rules/"+itoa(rule.ID)+"/update", url.Values{
+		"csrf_token": {csrf}, "watch_id": {itoa(id)},
+		"threshold_hours": {"3"}, "source": {"seen"}, "label": {"Not heard at all"},
+	})
+
+	after := ruleByLabel(t, st, id, "Not heard at all")
+	if after.Source != store.SourceSeen {
+		t.Errorf("source = %q, want it unchanged", after.Source)
+	}
+	if after.ThresholdHours != 3 {
+		t.Errorf("threshold = %d, want 3", after.ThresholdHours)
+	}
+}
+
+// A template is one click and must land exactly as advertised — its own
+// threshold, not whatever was left in the number box.
+func TestTemplateAddsTheAdvertisedRule(t *testing.T) {
+	srv, st, h := newServer(t)
+	cookie, csrf, u := signIn(t, srv, st)
+	id := addWatch(t, st, u.ID, "aa")
+
+	rec := postForm(t, h, cookie, "/watches/"+itoa(id)+"/rules", url.Values{
+		"csrf_token": {csrf}, "template": {"standard"},
+		"threshold_hours": {"99"}, // must be ignored
+	})
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("status %d", rec.Code)
+	}
+
+	got := ruleByLabel(t, st, id, "Standard")
+	if got.ThresholdHours != 2 {
+		t.Errorf("threshold = %d, want the template's 2 rather than the form's 99", got.ThresholdHours)
+	}
+	if got.Source != store.SourceTypes {
+		t.Errorf("source = %q, want types", got.Source)
+	}
+	want := []int{corescope.TypeRESPONSE, corescope.TypeTXTMsg, corescope.TypeACK,
+		corescope.TypeADVERT, corescope.TypeGRPTXT, corescope.TypePATH,
+		corescope.TypeTRACE, corescope.TypeCONTROL}
+	if len(got.Types) != len(want) {
+		t.Fatalf("types = %v, want %v", got.Types, want)
+	}
+	has := map[int]bool{}
+	for _, v := range got.Types {
+		has[v] = true
+	}
+	for _, v := range want {
+		if !has[v] {
+			t.Errorf("template rule is missing %s", corescope.TypeName(v))
+		}
+	}
+	// The point of the standard rule: requests are excluded.
+	if has[corescope.TypeREQ] || has[corescope.TypeANONReq] {
+		t.Error("the standard rule should leave the request types out")
+	}
+}
+
+func TestUnknownTemplateIsNotSilentlyAccepted(t *testing.T) {
+	srv, st, h := newServer(t)
+	cookie, csrf, u := signIn(t, srv, st)
+	id := addWatch(t, st, u.ID, "aa")
+	before, _ := st.RulesForWatch(context.Background(), id)
+
+	postForm(t, h, cookie, "/watches/"+itoa(id)+"/rules", url.Values{
+		"csrf_token": {csrf}, "template": {"nonsense"}, "threshold_hours": {"6"},
+	})
+
+	after, _ := st.RulesForWatch(context.Background(), id)
+	if len(after) != len(before) {
+		t.Errorf("rules went %d -> %d; an unknown template must not create a rule", len(before), len(after))
+	}
+}
+
+// Each rule shows the last time it saw what it is actually watching. Two rules
+// on one node can be looking at very different traffic, so a single node-level
+// figure wouldn't say which is about to fire.
+func TestRuleShowsItsOwnLastSeen(t *testing.T) {
+	srv, st, h := newServer(t)
+	ctx := context.Background()
+	cookie, _, u := signIn(t, srv, st)
+	id := addWatch(t, st, u.ID, "aa")
+	rule := ruleByLabel(t, st, id, "Not heard at all")
+
+	if err := st.WriteTx(ctx, func(tx *sql.Tx) error {
+		return st.SaveWatchState(ctx, tx, store.WatchState{
+			WatchID: id, RuleID: rule.ID, State: store.StateOK,
+			Since: t0, ObservedAt: t0.Add(-90 * time.Minute),
+		})
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/watches/"+itoa(id), nil)
+	req.AddCookie(cookie)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	body := rec.Body.String()
+	if !strings.Contains(body, "last 1h ago") && !strings.Contains(body, "last 90m ago") {
+		t.Errorf("the rule should show when it last saw its own traffic, got:\n%s", body)
+	}
+	// And a rule that has never seen anything must say so rather than
+	// implying it saw something at the epoch.
+	if !strings.Contains(body, "nothing matching seen yet") {
+		t.Error("a rule with no observation should say nothing matching has been seen")
+	}
+}
+
+// The Content-Security-Policy is default-src 'self' with no 'unsafe-inline'
+// for scripts, so an inline <script> is silently blocked — which is exactly
+// how the group buttons first shipped, doing nothing at all.
+func TestPagesUseNoInlineScript(t *testing.T) {
+	srv, st, h := newServer(t)
+	cookie, _, u := signIn(t, srv, st)
+	id := addWatch(t, st, u.ID, "aa")
+
+	for _, path := range []string{"/watches", "/search", "/watches/" + itoa(id)} {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		req.AddCookie(cookie)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		body := rec.Body.String()
+		for _, open := range []string{"<script>", "<script >"} {
+			if strings.Contains(body, open) {
+				t.Errorf("%s has an inline <script>, which the CSP blocks", path)
+			}
+		}
+		if strings.Contains(body, "onclick=") {
+			t.Errorf("%s uses an inline handler, which the CSP blocks", path)
+		}
+	}
+
+	// ...and the external file it uses instead must actually be served.
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/static/rules.js", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("/static/rules.js: status %d, want 200", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "data-group") {
+		t.Error("/static/rules.js does not look like the group-toggle script")
+	}
+}
+
+// ---------------------------------------------------------- observers ----
+
+func addObserverWatch(t *testing.T, st *store.Store, userID int64, key string) int64 {
+	t.Helper()
+	id, err := st.CreateWatch(context.Background(), store.Watch{
+		UserID: userID, TargetKind: "observer", TargetKey: key,
+		ThresholdHours: 1, NotifyRecovery: true,
+	}, 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return id
+}
+
+// An observer's default is its own check-in, not what it has heard. Whether
+// it hears anything depends on how busy the mesh around it is; whether it
+// checks in depends on whether it is working.
+func TestObserverDefaultsToCheckingIn(t *testing.T) {
+	_, st, _ := newServer(t)
+	ctx := context.Background()
+	u, _ := st.UpsertUser(ctx, "d1", "alice", "")
+	id := addObserverWatch(t, st, u.ID, "obs1")
+
+	rules, _ := st.RulesForWatch(ctx, id)
+	if len(rules) != 1 {
+		t.Fatalf("observer got %d rules, want 1", len(rules))
+	}
+	if rules[0].Source != store.SourceSeen {
+		t.Errorf("source = %q, want %q (its check-in)", rules[0].Source, store.SourceSeen)
+	}
+	if rules[0].ThresholdHours != 1 {
+		t.Errorf("threshold = %d, want 1", rules[0].ThresholdHours)
+	}
+	if rules[0].Label != "Stopped checking in" {
+		t.Errorf("label = %q", rules[0].Label)
+	}
+}
+
+// The Standard observer template is offered on an observer and not on a node,
+// and vice versa — a control that cannot work is worse than no control.
+func TestTemplatesAreOfferedByKind(t *testing.T) {
+	srv, st, h := newServer(t)
+	ctx := context.Background()
+	if _, err := st.UpsertTargets(ctx, []corescope.Observation{
+		{Kind: corescope.KindNode, Key: "aa", Name: "A node", LastSeen: t0.Add(-time.Minute)},
+		{Kind: corescope.KindObserver, Key: "obs1", Name: "An observer", LastSeen: t0.Add(-time.Minute)},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cookie, _, u := signIn(t, srv, st)
+	nodeID := addWatch(t, st, u.ID, "aa")
+	obsID := addObserverWatch(t, st, u.ID, "obs1")
+
+	get := func(id int64) string {
+		req := httptest.NewRequest(http.MethodGet, "/watches/"+itoa(id), nil)
+		req.AddCookie(cookie)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status %d for watch %d", rec.Code, id)
+		}
+		return rec.Body.String()
+	}
+
+	obsPage := get(obsID)
+	if !strings.Contains(obsPage, "Standard observer") {
+		t.Error("the observer page should offer the Standard observer template")
+	}
+	if strings.Contains(obsPage, "Carrying traffic") {
+		t.Error("node templates must not be offered on an observer")
+	}
+	// And no per-type picker, since an observer never appears in a route.
+	if strings.Contains(obsPage, "GRP_DATA") {
+		t.Error("an observer has no payload types to pick from")
+	}
+
+	nodePage := get(nodeID)
+	if strings.Contains(nodePage, "Standard observer") {
+		t.Error("the observer template must not be offered on a node")
+	}
+	if !strings.Contains(nodePage, "Carrying traffic") {
+		t.Error("the node page should offer the node templates")
+	}
+}
+
+func TestStandardObserverTemplateAddsACheckInRule(t *testing.T) {
+	srv, st, h := newServer(t)
+	cookie, csrf, u := signIn(t, srv, st)
+	id := addObserverWatch(t, st, u.ID, "obs1")
+
+	rec := postForm(t, h, cookie, "/watches/"+itoa(id)+"/rules", url.Values{
+		"csrf_token": {csrf}, "template": {"standard-observer"},
+	})
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("status %d", rec.Code)
+	}
+	got := ruleByLabel(t, st, id, "Standard observer")
+	if got.Source != store.SourceSeen {
+		t.Errorf("source = %q, want the check-in", got.Source)
+	}
+	if got.ThresholdHours != 1 {
+		t.Errorf("threshold = %d, want 1", got.ThresholdHours)
+	}
+	if len(got.Types) != 0 {
+		t.Errorf("types = %v, want none — it reads CoreScope's figure", got.Types)
+	}
+}
+
+// A template aimed at the other kind of target must be refused rather than
+// creating a rule that can never match.
+func TestTemplateForTheWrongKindIsRefused(t *testing.T) {
+	srv, st, h := newServer(t)
+	cookie, csrf, u := signIn(t, srv, st)
+	id := addObserverWatch(t, st, u.ID, "obs1")
+	before, _ := st.RulesForWatch(context.Background(), id)
+
+	postForm(t, h, cookie, "/watches/"+itoa(id)+"/rules", url.Values{
+		"csrf_token": {csrf}, "template": {"standard"}, // a node template
+	})
+
+	after, _ := st.RulesForWatch(context.Background(), id)
+	if len(after) != len(before) {
+		t.Errorf("rules went %d -> %d; a node template must not attach to an observer",
+			len(before), len(after))
+	}
+}
+
+// Rules are named so the alert message can lead with the name. An unnamed one
+// is refused rather than stored.
+func TestRuleNameIsRequired(t *testing.T) {
+	srv, st, h := newServer(t)
+	cookie, csrf, u := signIn(t, srv, st)
+	id := addWatch(t, st, u.ID, "aa")
+	before, _ := st.RulesForWatch(context.Background(), id)
+
+	postForm(t, h, cookie, "/watches/"+itoa(id)+"/rules", url.Values{
+		"csrf_token": {csrf}, "threshold_hours": {"6"}, "types": {"4"},
+	})
+	after, _ := st.RulesForWatch(context.Background(), id)
+	if len(after) != len(before) {
+		t.Error("a rule with no name must be refused")
+	}
+
+	// ...and editing cannot blank an existing name either.
+	rule := ruleByLabel(t, st, id, "Not heard at all")
+	postForm(t, h, cookie, "/rules/"+itoa(rule.ID)+"/update", url.Values{
+		"csrf_token": {csrf}, "watch_id": {itoa(id)},
+		"threshold_hours": {"9"}, "source": {"seen"}, "label": {"  "},
+	})
+	if got := ruleByLabel(t, st, id, "Not heard at all"); got.ThresholdHours == 9 {
+		t.Error("an edit that blanks the name must be refused entirely")
+	}
+}
+
+func TestRecoveryToggleRoundTrips(t *testing.T) {
+	srv, st, h := newServer(t)
+	ctx := context.Background()
+	cookie, csrf, u := signIn(t, srv, st)
+	id := addWatch(t, st, u.ID, "aa")
+
+	w0, _ := st.WatchOwnedBy(ctx, u.ID, id)
+	if !w0.NotifyRecovery {
+		t.Fatal("recovery messages should start on")
+	}
+
+	// An unticked checkbox posts nothing at all, which is how it turns off.
+	postForm(t, h, cookie, "/watches/"+itoa(id)+"/recovery", url.Values{"csrf_token": {csrf}})
+	if w, _ := st.WatchOwnedBy(ctx, u.ID, id); w.NotifyRecovery {
+		t.Error("posting without the checkbox should turn recovery messages off")
+	}
+
+	postForm(t, h, cookie, "/watches/"+itoa(id)+"/recovery",
+		url.Values{"csrf_token": {csrf}, "notify_recovery": {"on"}})
+	if w, _ := st.WatchOwnedBy(ctx, u.ID, id); !w.NotifyRecovery {
+		t.Error("ticking it should turn them back on")
+	}
+}
+
+// 7 of the 9 observers on the live instance are also mesh nodes — one box
+// doing both jobs, sharing a public key — and several of them relay. Such a
+// box DOES appear in packet routes, so per-type rules mean something for it
+// and the page must offer them.
+func TestObserverThatIsAlsoANodeGetsPerTypeRules(t *testing.T) {
+	srv, st, h := newServer(t)
+	ctx := context.Background()
+	const key = "463f15467ceba721cf903a33e0da069627d86ddfa21f397a14a128fa166d8976"
+	if _, err := st.UpsertTargets(ctx, []corescope.Observation{
+		{Kind: corescope.KindNode, Key: key, Name: "Dual box", Role: "repeater",
+			LastSeen: t0.Add(-time.Minute), LastRelayed: t0.Add(-2 * time.Minute)},
+		{Kind: corescope.KindObserver, Key: key, Name: "Dual box obs",
+			LastSeen: t0.Add(-time.Minute), LastPacket: t0.Add(-13 * time.Minute)},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cookie, _, u := signIn(t, srv, st)
+	id := addObserverWatch(t, st, u.ID, key)
+
+	req := httptest.NewRequest(http.MethodGet, "/watches/"+itoa(id), nil)
+	req.AddCookie(cookie)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	body := rec.Body.String()
+
+	if !strings.Contains(body, "GRP_TXT") {
+		t.Error("an observer that is also a node must offer the per-type picker")
+	}
+	if !strings.Contains(body, "observer <em>and</em> a mesh node") {
+		t.Error("the page should say why both sets of questions apply")
+	}
+	// The observer half is still there.
+	if !strings.Contains(body, "Last checked in") {
+		t.Error("the observer's own check-in figure should still be shown")
+	}
+
+	// A purely-observing station gets neither.
+	if _, err := st.UpsertTargets(ctx, []corescope.Observation{
+		{Kind: corescope.KindObserver, Key: "solo", Name: "Solo obs", LastSeen: t0},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	soloID := addObserverWatch(t, st, u.ID, "solo")
+	req = httptest.NewRequest(http.MethodGet, "/watches/"+itoa(soloID), nil)
+	req.AddCookie(cookie)
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if strings.Contains(rec.Body.String(), "GRP_TXT") {
+		t.Error("a station that only observes has no packet types to pick")
+	}
+}
+
+// Route hops are attributed to nodes. An observer watch on the same box must
+// still see that traffic, or the dual-role case silently reports nothing.
+func TestObserverSeesActivityFiledUnderItsNodeKey(t *testing.T) {
+	_, st, _ := newServer(t)
+	ctx := context.Background()
+	const key = "463f15467ceba721cf903a33e0da069627d86ddfa21f397a14a128fa166d8976"
+
+	if err := st.WriteTx(ctx, func(tx *sql.Tx) error {
+		return st.UpsertActivity(ctx, tx, "node", key,
+			corescope.TypeGRPTXT, store.DirCarried, t0.Add(-5*time.Minute), 3)
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	acts, err := st.ActivityFor(ctx, "observer", key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(acts) != 1 || acts[0].PayloadType != corescope.TypeGRPTXT {
+		t.Fatalf("observer lookup got %+v, want the node's relayed traffic", acts)
+	}
+	if acts[0].EvidenceCount != 3 {
+		t.Errorf("evidence = %d, want 3", acts[0].EvidenceCount)
+	}
+
+	all, err := st.AllActivity(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all[key]) != 1 {
+		t.Errorf("AllActivity should key on the target key alone, got %+v", all)
 	}
 }

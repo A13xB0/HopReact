@@ -1,0 +1,11 @@
+-- Make the recovery message optional.
+--
+-- HopReact has always sent one when a node comes back, and only when the
+-- outage itself was announced — you never hear "recovered" for something you
+-- were never told had failed. That default is right, so this column starts at
+-- 1 and nobody's alerting changes.
+--
+-- But it should be a choice. Someone watching a node that flaps around its
+-- threshold, or who only wants to hear bad news, has no way to say so short
+-- of muting the node entirely, which also loses the alerts they do want.
+ALTER TABLE watches ADD COLUMN notify_recovery INTEGER NOT NULL DEFAULT 1;

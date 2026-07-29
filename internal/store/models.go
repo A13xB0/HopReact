@@ -27,6 +27,10 @@ type Target struct {
 
 	LastSeen    time.Time
 	LastRelayed time.Time
+	// LastPacket is when an observer last HEARD something, as opposed to
+	// LastSeen, which for an observer is when it last checked in. Zero for
+	// nodes.
+	LastPacket time.Time
 	// RelayEverObserved is zero until this target has been seen relaying at
 	// least once. While it is zero the relay signal stays unknown and can
 	// never alert — 189 nodes on the live instance have never relayed.
@@ -52,6 +56,9 @@ type Watch struct {
 	AlertOnRelay   bool
 	Label          string
 	MutedUntil     time.Time
+	// NotifyRecovery controls the "back online" message. On by default: you
+	// are told when something you were warned about is fixed.
+	NotifyRecovery bool
 	CreatedAt      time.Time
 }
 
@@ -65,6 +72,11 @@ const (
 	// SourceRelayed is CoreScope's own last_relayed — seen in any packet
 	// route, at whatever hop width.
 	SourceRelayed Source = "relayed"
+	// SourcePackets is when an observer last heard traffic, as opposed to
+	// when it last checked in. Only meaningful for observers, and a much
+	// noisier signal than SourceSeen — a quiet mesh silences it without
+	// anything being wrong.
+	SourcePackets Source = "packets"
 	// SourceTypes reads the per-type evidence HopReact attributes itself.
 	//
 	// Strictly narrower than the two above: it only counts adverts (whose
@@ -199,6 +211,11 @@ type WatchView struct {
 	Watch  Watch
 	Target *Target // nil when CoreScope has never reported this key
 	Rules  []RuleView
+	// AlsoNode is set on an observer watch whose key is also a mesh node —
+	// the same physical box doing both jobs, which is 7 of the 9 observers on
+	// the live instance. Such a box does appear in packet routes, so per-type
+	// rules mean something for it.
+	AlsoNode bool
 }
 
 // Worst returns the rule in the most serious state, which is what the summary

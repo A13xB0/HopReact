@@ -81,6 +81,14 @@ type Observation struct {
 	// route. Zero means never. Always zero for observers.
 	LastRelayed time.Time
 
+	// LastPacket is when an observer last HEARD something, as distinct from
+	// LastSeen, which for an observer is when it last checked in. They are
+	// genuinely different: on the live instance one station reported in
+	// moments ago having last heard a packet 13 minutes earlier, and another
+	// 3 minutes versus 23. Conflating them means a perfectly healthy observer
+	// somewhere quiet looks dead. Always zero for nodes.
+	LastPacket time.Time
+
 	RelayCount1h  int
 	RelayCount24h int
 	Lat, Lon      *float64
@@ -214,11 +222,21 @@ type observersResponse struct {
 
 // FetchObservers returns every observer station.
 //
-// An observer's liveness question is "is it still reporting packets", so
-// last_packet_at is the signal, with last_seen as a fallback for an
-// instance that predates it. There is no relay concept here — an observer
-// reports what it hears, it doesn't forward — so LastRelayed stays zero and
-// the relay alert can never fire for one.
+// Two different questions, kept apart deliberately:
+//
+//   - LastSeen is last_seen, when the station last checked in. This is what
+//     CoreScope's own observers page calls its last status, and it is the
+//     honest answer to "is this box still alive".
+//   - LastPacket is last_packet_at, when it last heard traffic.
+//
+// Treating the second as liveness — which this did originally — makes a
+// healthy observer somewhere quiet look dead, because hearing nothing is a
+// property of the mesh around it rather than of the station. On the live
+// instance the two differ by 13 and 23 minutes on two of the nine.
+//
+// There is no relay concept here — an observer reports what it hears, it
+// doesn't forward — so LastRelayed stays zero and the relay rule can never
+// fire for one.
 func (c *Client) FetchObservers(ctx context.Context) ([]Observation, error) {
 	u := c.BaseURL + "/api/observers"
 	var resp observersResponse
@@ -231,12 +249,16 @@ func (c *Client) FetchObservers(ctx context.Context) ([]Observation, error) {
 			continue
 		}
 		out = append(out, Observation{
-			Kind:     KindObserver,
-			Key:      strings.ToLower(o.ID),
-			Name:     deref(o.Name),
-			LastSeen: firstTime(o.LastPacketAt, o.LastSeen),
-			Lat:      o.Lat,
-			Lon:      o.Lon,
+			Kind: KindObserver,
+			Key:  strings.ToLower(o.ID),
+			Name: deref(o.Name),
+			// last_seen leads: it is the station's own check-in. Falling back
+			// to last_packet_at only covers an instance old enough not to
+			// report the former at all.
+			LastSeen:   firstTime(o.LastSeen, o.LastPacketAt),
+			LastPacket: parseTime(o.LastPacketAt),
+			Lat:        o.Lat,
+			Lon:        o.Lon,
 		})
 	}
 	return out, nil

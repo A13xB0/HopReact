@@ -1,6 +1,11 @@
 {{define "content"}}
 {{$w := .Watch}}
 {{$muted := and (not $w.Watch.MutedUntil.IsZero) ($w.Watch.MutedUntil.After $.Now)}}
+{{$observer := eq $w.Watch.TargetKind "observer"}}
+{{/* An observer that is also a mesh node is one box doing two jobs, and it
+     DOES appear in packet routes — 7 of the 9 on the live instance. Only a
+     station that is purely an observer has nothing to break down by type. */}}
+{{$typesApply := or (not $observer) $w.AlsoNode}}
 
 <div class="card">
   <div class="row spread" style="margin-bottom:.5rem">
@@ -34,6 +39,7 @@
   {{else}}
   <div class="list">
     {{range $w.Rules}}
+    {{$feed := ne .Rule.Source "types"}}
     <div class="rule">
       <div>
         <div class="rule-title">
@@ -43,13 +49,82 @@
         <div class="small">
           No {{ruleDesc .Rule}} for {{.Rule.ThresholdHours}}h
         </div>
+        {{/* What this particular rule is looking at. Two rules on one node
+             can be watching very different traffic, so a single node-level
+             "last seen" wouldn't tell you which one is about to fire. */}}
+        <div class="node-meta">
+          {{if .State.ObservedAt.IsZero}}
+            <span class="pill muted"><span class="dot"></span>nothing matching seen yet</span>
+          {{else}}
+            <span class="pill {{freshClass .State.ObservedAt $.Now}}"><span class="dot"></span>last {{since .State.ObservedAt $.Now}}</span>
+            <span class="small">{{stamp .State.ObservedAt}}</span>
+          {{end}}
+        </div>
         {{if eq .State.State "unknown"}}
         <div class="small note">
           Nothing to judge yet — nothing matching this rule has ever been
           recorded for this node, so it will stay quiet rather than guess.
         </div>
         {{end}}
+
+        <details class="edit">
+          <summary class="small">Edit</summary>
+          <form method="post" action="/rules/{{.Rule.ID}}/update">
+            <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
+            <input type="hidden" name="watch_id" value="{{$w.Watch.ID}}">
+            {{if $feed}}<input type="hidden" name="source" value="{{.Rule.Source}}">{{end}}
+
+            <div class="row" style="margin:.6rem 0">
+              <label class="field">Tell me after
+                <input type="number" name="threshold_hours" min="1" max="720"
+                       value="{{.Rule.ThresholdHours}}"
+                       aria-label="Hours of silence before you are alerted">
+                hours
+              </label>
+              {{if not $feed}}
+              <label class="field">counting
+                <select name="direction" aria-label="Which involvement counts">
+                  <option value="either" {{if eq .Rule.Direction "either"}}selected{{end}}>sent or passed on</option>
+                  <option value="carried" {{if eq .Rule.Direction "carried"}}selected{{end}}>only traffic it passed on</option>
+                  <option value="sent" {{if eq .Rule.Direction "sent"}}selected{{end}}>only traffic it sent</option>
+                </select>
+              </label>
+              {{end}}
+              <label class="field">called
+                <input type="text" name="label" value="{{.Rule.Label}}" required maxlength="60"
+                       style="width:10rem" aria-label="Name for this rule — the alert message uses it">
+              </label>
+            </div>
+
+            {{if not $feed}}
+            <fieldset class="types">
+              <legend class="small">Which traffic counts</legend>
+              {{$rule := .Rule}}
+              {{range $.Groups}}
+              <div class="tgroup">
+                <div class="tgroup-head">
+                  <button type="button" class="chip" data-group="e{{$rule.ID}}-{{.Name}}">{{.Name}}</button>
+                </div>
+                <div class="tgroup-types" data-group-body="e{{$rule.ID}}-{{.Name}}">
+                  {{range .Types}}
+                  <label class="tcheck">
+                    <input type="checkbox" name="types" value="{{.}}" {{if ruleHas $rule .}}checked{{end}}>
+                    <span class="mono">{{typeName .}}</span>
+                  </label>
+                  {{end}}
+                </div>
+              </div>
+              {{end}}
+            </fieldset>
+            {{end}}
+
+            <div class="row" style="margin-top:.7rem">
+              <button type="submit">Save changes</button>
+            </div>
+          </form>
+        </details>
       </div>
+
       <form method="post" action="/rules/{{.Rule.ID}}/delete" style="margin:0">
         <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
         <input type="hidden" name="watch_id" value="{{$w.Watch.ID}}">
@@ -61,9 +136,90 @@
   {{end}}
 </div>
 
+{{/* --------------------------------------------------------- templates -- */}}
+<div class="card">
+  <h3>Ready-made rules</h3>
+  <p class="small" style="margin:.2rem 0 .9rem">
+    One click each. They're a starting point — add one, then edit it above if
+    you want something different.
+  </p>
+  <div class="list">
+    {{range .Templates}}
+    <div class="rule">
+      <div>
+        <div class="rule-title">{{.Name}} <span class="small">· {{.ThresholdHours}}h</span></div>
+        <div class="small">{{.Note}}</div>
+        {{if .Types}}
+        <div class="tgroup-types" style="margin-top:.45rem">
+          {{range .Types}}<span class="tcheck mono">{{typeName .}}</span>{{end}}
+        </div>
+        {{end}}
+      </div>
+      <form method="post" action="/watches/{{$w.Watch.ID}}/rules" style="margin:0">
+        <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
+        <input type="hidden" name="template" value="{{.ID}}">
+        <button type="submit">Add</button>
+      </form>
+    </div>
+    {{end}}
+  </div>
+</div>
+
 {{/* -------------------------------------------------------- add a rule -- */}}
 <div class="card">
   <h3>Add a rule</h3>
+
+  {{if $observer}}
+  <p class="small" style="margin:.2rem 0 .9rem">
+    {{if $w.AlsoNode}}
+      This box is an observer <em>and</em> a mesh node, so both sets of
+      questions apply. These two are about the observer half — whether the
+      station itself is reporting.
+    {{else}}
+      This station only observes; it doesn't carry traffic for anyone, so it
+      never appears in a packet route and there's nothing to break down by
+      packet type. These two questions are the ones worth asking.
+    {{end}}
+  </p>
+  <form method="post" action="/watches/{{$w.Watch.ID}}/rules">
+    <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
+    <div class="row">
+      <label class="field">Tell me if it
+        <select name="source" aria-label="Which figure to watch">
+          <option value="seen">stops checking in</option>
+          <option value="packets">stops hearing any traffic</option>
+        </select>
+      </label>
+      <label class="field">for
+        <input type="number" name="threshold_hours" min="1" max="720" value="1"
+               aria-label="Hours before you are alerted">
+        hours
+      </label>
+      <label class="field">called
+        <input type="text" name="label" required maxlength="60" style="width:11rem"
+               placeholder="e.g. Inverness observer"
+               aria-label="Name for this rule — the alert message uses it">
+      </label>
+      <button type="submit">Add rule</button>
+    </div>
+  </form>
+  <p class="small note" style="margin-top:.9rem">
+    <b>Checking in</b> is the station telling CoreScope it's alive — its last
+    status. <b>Hearing traffic</b> depends on how busy the mesh around it is,
+    so a healthy observer somewhere quiet can go hours without hearing
+    anything. Prefer the first unless you specifically want the second.
+  </p>
+
+  {{end}}
+
+  {{if $typesApply}}
+  {{if $observer}}
+  <h3 style="margin-top:1.4rem">…and about the node half</h3>
+  <p class="small" style="margin:.2rem 0 .9rem">
+    This box also carries traffic for other people, so the per-type rules
+    below apply to it exactly as they would to any repeater.
+  </p>
+  {{end}}
   <form method="post" action="/watches/{{$w.Watch.ID}}/rules">
     <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
 
@@ -80,11 +236,16 @@
           <option value="sent">only traffic it sent</option>
         </select>
       </label>
-      <label class="field">named
-        <input type="text" name="label" placeholder="optional" style="width:11rem"
-               aria-label="Optional name for this rule">
+      <label class="field">called
+        <input type="text" name="label" required maxlength="60" style="width:11rem"
+               placeholder="e.g. Ben Nevis relay"
+               aria-label="Name for this rule — the alert message uses it">
       </label>
     </div>
+    <p class="small" style="margin:-.3rem 0 .8rem">
+      The name is what the alert message leads with, so make it something
+      you'll recognise at three in the morning.
+    </p>
 
     <fieldset class="types">
       <legend class="small">Which traffic counts</legend>
@@ -132,12 +293,53 @@
                aria-label="Hours of silence before you are alerted">
         hours
       </label>
+      <label class="field">called
+        <input type="text" name="label" required maxlength="60" style="width:9rem"
+               placeholder="e.g. Totally silent"
+               aria-label="Name for this rule">
+      </label>
       <button class="secondary" type="submit">Add</button>
     </form>
   </details>
+  {{end}}
 </div>
 
 {{/* --------------------------------------------------------- activity -- */}}
+{{if $observer}}
+<div class="card">
+  <h3>What we've seen</h3>
+  <p class="small" style="margin:.2rem 0 .9rem">
+    The two figures CoreScope keeps for the observing station itself.
+    {{if $w.AlsoNode}}
+      This box is also a mesh node, so its traffic is broken down by type
+      below as well.
+    {{end}}
+  </p>
+  <div style="overflow-x:auto">
+  <table>
+    <thead><tr><th></th><th>when</th><th></th></tr></thead>
+    <tbody>
+      <tr>
+        <td><b>Last checked in</b><br><span class="small">its own status — this is the one to alert on</span></td>
+        <td>{{if and $w.Target (not $w.Target.LastSeen.IsZero)}}
+              <span class="pill {{freshClass $w.Target.LastSeen $.Now}}"><span class="dot"></span>{{since $w.Target.LastSeen $.Now}}</span>
+            {{else}}<span class="dim">never</span>{{end}}</td>
+        <td class="small">{{if and $w.Target (not $w.Target.LastSeen.IsZero)}}{{stamp $w.Target.LastSeen}}{{end}}</td>
+      </tr>
+      <tr>
+        <td><b>Last heard a packet</b><br><span class="small">depends on how busy the mesh around it is</span></td>
+        <td>{{if and $w.Target (not $w.Target.LastPacket.IsZero)}}
+              <span class="pill {{freshClass $w.Target.LastPacket $.Now}}"><span class="dot"></span>{{since $w.Target.LastPacket $.Now}}</span>
+            {{else}}<span class="dim">never</span>{{end}}</td>
+        <td class="small">{{if and $w.Target (not $w.Target.LastPacket.IsZero)}}{{stamp $w.Target.LastPacket}}{{end}}</td>
+      </tr>
+    </tbody>
+  </table>
+  </div>
+</div>
+{{end}}
+
+{{if $typesApply}}
 <div class="card">
   <h3>What we've seen</h3>
   <p class="small" style="margin:.2rem 0 .9rem">
@@ -185,6 +387,8 @@
   </p>
 </div>
 
+{{end}}
+
 {{/* ------------------------------------------------------------ admin -- */}}
 <div class="card">
   <h3>This node</h3>
@@ -212,21 +416,20 @@
     Muting keeps tracking this node — it just doesn't message you, which is
     what you want while you're up a hill working on it.
   </p>
+
+  <form method="post" action="/watches/{{$w.Watch.ID}}/recovery" style="margin:.9rem 0 0">
+    <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
+    <label class="relay-opt" style="max-width:none">
+      <input type="checkbox" name="notify_recovery" data-autosubmit
+             {{if $w.Watch.NotifyRecovery}}checked{{end}}>
+      <span><b>Tell me when it comes back.</b>
+      A second message once the rule that alerted you is happy again. You only
+      ever get one if you were told about the problem in the first place.</span>
+    </label>
+    <button class="secondary" type="submit" data-hide-when-scripted
+            style="margin-top:.5rem">Save</button>
+  </form>
 </div>
 
-<script>
-// Progressive enhancement only: the group buttons tick their own checkboxes.
-// Without JavaScript every box is still there to tick by hand, so the form
-// works either way.
-document.querySelectorAll('.chip[data-group]').forEach(function (btn) {
-  btn.addEventListener('click', function () {
-    var body = document.querySelector('[data-group-body="' + btn.dataset.group + '"]');
-    if (!body) return;
-    var boxes = body.querySelectorAll('input[type=checkbox]');
-    var turnOn = Array.prototype.some.call(boxes, function (b) { return !b.checked; });
-    boxes.forEach(function (b) { b.checked = turnOn; });
-    btn.classList.toggle('on', turnOn);
-  });
-});
-</script>
+<script src="/static/rules.js" defer></script>
 {{end}}
