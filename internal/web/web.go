@@ -341,13 +341,14 @@ var ruleTemplates = []ruleTemplate{
 		ThresholdHours: 12,
 	},
 	{
-		ID:             "adverts",
-		Kind:           string(corescope.KindNode),
-		Name:           "Adverts only",
-		Note:           "The most reliable heartbeat: a node states its own key in an advert, so this never depends on route hashes. Quiet meshes suit this one.",
+		ID:   "adverts",
+		Kind: string(corescope.KindNode),
+		Name: "Adverts only",
+		Note: "The most reliable heartbeat: a node states its own key in an advert, so this never depends on route hashes. " +
+			"A day and an hour, so a node that adverts daily gets some slack before this complains.",
 		Types:          []int{corescope.TypeADVERT},
 		Direction:      store.DirEither,
-		ThresholdHours: 6,
+		ThresholdHours: 25,
 	},
 	{
 		ID:   "traffic",
