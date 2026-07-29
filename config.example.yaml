@@ -201,7 +201,15 @@ status:
   #  - name: "CoreScope"
   #    target: "https://corescope.example/api/observers"
   #    note: "Collects and decodes the mesh traffic this page is built from."
-  #  - name: "MQTT broker"
-  #    kind: tcp
-  #    target: "broker.example:8883"
-  #    note: "Where observer stations publish everything they hear." 
+  #  - name: "MQTT endpoint"
+  #    target: "https://mqtt.example/"
+  #    note: "The WSS endpoint observers connect through."
+  #
+  # On MQTT specifically: an https check against the broker's own hostname
+  # proves the listener and its TLS are alive, which is worth having, but a
+  # WSS endpoint will not complete a websocket handshake for a plain probe —
+  # expect a redirect or a 4xx, both of which count as up. What it cannot tell
+  # you is whether the broker is still carrying sessions. That is what
+  # mqtt_window_minutes above is for, and the two together cover both halves:
+  # one notices the host or its nginx dying, the other notices the broker
+  # accepting no traffic.
