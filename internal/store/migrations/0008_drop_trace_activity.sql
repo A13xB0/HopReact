@@ -1,0 +1,15 @@
+-- Remove TRACE evidence recorded before we knew better.
+--
+-- A TRACE packet's path field carries SNR readings, not node hashes — "append
+-- SNR (Not hash!)" in MeshCore's Mesh.cpp. Every TRACE row in this table was
+-- therefore a signal reading that happened to match some node's first three
+-- key bytes. The attributor no longer records them, but the rows already
+-- written would sit there forever showing a "last seen" for something that
+-- never happened.
+--
+-- Direct-route attributions from the same period cannot be undone this
+-- cleanly — nothing distinguishes them once stored — but they only make a
+-- timestamp slightly too recent, and correct evidence overwrites it as it
+-- arrives. A TRACE row can never be corrected, because no honest TRACE
+-- evidence will ever be written.
+DELETE FROM target_activity WHERE payload_type = 9;
