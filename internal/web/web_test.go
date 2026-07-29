@@ -886,8 +886,8 @@ func TestTemplateAddsTheAdvertisedRule(t *testing.T) {
 	}
 
 	got := ruleByLabel(t, st, id, "Standard")
-	if got.ThresholdHours != 2 {
-		t.Errorf("threshold = %d, want the template's 2 rather than the form's 99", got.ThresholdHours)
+	if got.ThresholdHours != 12 {
+		t.Errorf("threshold = %d, want the template's 12 rather than the form's 99", got.ThresholdHours)
 	}
 	if got.Source != store.SourceTypes {
 		t.Errorf("source = %q, want types", got.Source)

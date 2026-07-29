@@ -47,11 +47,11 @@ quiet before HopReact messages you.</p></div>
 {{range .Watches}}
 {{$worst := .Worst}}
 <tr>
-  <td>
+  <td data-label="node">
     <strong><a href="/watches/{{.Watch.ID}}">{{if and .Target .Target.Name}}{{.Target.Name}}{{else}}{{shortKey .Watch.TargetKey}}{{end}}</a></strong><br>
     <span class="small">{{.Watch.TargetKind}}{{if .Target}}{{if .Target.Role}} · {{.Target.Role}}{{end}}{{end}}</span>
   </td>
-  <td>
+  <td data-label="status">
     {{if $worst}}
       <span class="pill {{stateClass $worst.State}}"><span class="dot"></span>{{stateLabel $worst.State}}</span><br>
       <span class="small">{{ruleTitle $worst.Rule}}</span>
@@ -60,15 +60,15 @@ quiet before HopReact messages you.</p></div>
     {{end}}
     {{if .Watch.MutedUntil.IsZero}}{{else}}<br><span class="small">muted until {{stamp .Watch.MutedUntil}}</span>{{end}}
   </td>
-  <td>
+  <td data-label="last seen">
     {{if .Target}}{{since .Target.LastSeen $.Now}}<br><span class="small">{{stamp .Target.LastSeen}}</span>
     {{else}}<span class="small">CoreScope has never reported this key</span>{{end}}
   </td>
-  <td class="small">
+  <td class="small" data-label="rules">
     {{range .Rules}}{{ruleTitle .Rule}} · {{.Rule.ThresholdHours}}h<br>{{end}}
     <a href="/watches/{{.Watch.ID}}">Change…</a>
   </td>
-  <td>
+  <td data-label="">
     <form method="post" action="/watches/{{.Watch.ID}}/delete" style="margin:0">
       <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
       <button class="danger" type="submit">Remove</button>

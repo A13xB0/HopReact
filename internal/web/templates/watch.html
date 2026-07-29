@@ -320,18 +320,18 @@
     <thead><tr><th></th><th>when</th><th></th></tr></thead>
     <tbody>
       <tr>
-        <td><b>Last checked in</b><br><span class="small">its own status — this is the one to alert on</span></td>
-        <td>{{if and $w.Target (not $w.Target.LastSeen.IsZero)}}
+        <td data-label="figure"><b>Last checked in</b><br><span class="small">its own status — this is the one to alert on</span></td>
+        <td data-label="when">{{if and $w.Target (not $w.Target.LastSeen.IsZero)}}
               <span class="pill {{freshClass $w.Target.LastSeen $.Now}}"><span class="dot"></span>{{since $w.Target.LastSeen $.Now}}</span>
             {{else}}<span class="dim">never</span>{{end}}</td>
-        <td class="small">{{if and $w.Target (not $w.Target.LastSeen.IsZero)}}{{stamp $w.Target.LastSeen}}{{end}}</td>
+        <td class="small" data-label="at">{{if and $w.Target (not $w.Target.LastSeen.IsZero)}}{{stamp $w.Target.LastSeen}}{{end}}</td>
       </tr>
       <tr>
-        <td><b>Last heard a packet</b><br><span class="small">depends on how busy the mesh around it is</span></td>
-        <td>{{if and $w.Target (not $w.Target.LastPacket.IsZero)}}
+        <td data-label="figure"><b>Last heard a packet</b><br><span class="small">depends on how busy the mesh around it is</span></td>
+        <td data-label="when">{{if and $w.Target (not $w.Target.LastPacket.IsZero)}}
               <span class="pill {{freshClass $w.Target.LastPacket $.Now}}"><span class="dot"></span>{{since $w.Target.LastPacket $.Now}}</span>
             {{else}}<span class="dim">never</span>{{end}}</td>
-        <td class="small">{{if and $w.Target (not $w.Target.LastPacket.IsZero)}}{{stamp $w.Target.LastPacket}}{{end}}</td>
+        <td class="small" data-label="at">{{if and $w.Target (not $w.Target.LastPacket.IsZero)}}{{stamp $w.Target.LastPacket}}{{end}}</td>
       </tr>
     </tbody>
   </table>
@@ -354,18 +354,23 @@
     </thead>
     <tbody>
       {{range .Activity}}
-      <tr>
-        <td class="mono">{{.Name}}</td>
-        <td>
+      {{$seen := gt (add .SentEvidence .CarriedEvidence) 0}}
+      {{/* Rows with nothing behind them are marked so the phone layout can
+           collapse them to one line. Eight of the thirteen types are usually
+           empty, and eight full-height cards saying "never" three times over
+           is noise you have to scroll past to reach the real ones. */}}
+      <tr {{if not $seen}}class="empty"{{end}}>
+        <td class="mono" data-label="traffic">{{.Name}}</td>
+        <td data-label="sent by it">
           {{if not .SentKnowable}}<span class="dim" title="Only adverts name their sender">—</span>
           {{else if .Sent.IsZero}}<span class="dim">never</span>
           {{else}}<span class="pill {{freshClass .Sent $.Now}}"><span class="dot"></span>{{since .Sent $.Now}}</span>{{end}}
         </td>
-        <td>
+        <td data-label="passed on by it">
           {{if .Carried.IsZero}}<span class="dim">never</span>
           {{else}}<span class="pill {{freshClass .Carried $.Now}}"><span class="dot"></span>{{since .Carried $.Now}}</span>{{end}}
         </td>
-        <td class="small">{{if gt (add .SentEvidence .CarriedEvidence) 0}}{{add .SentEvidence .CarriedEvidence}}{{else}}—{{end}}</td>
+        <td class="small" data-label="packets">{{if $seen}}{{add .SentEvidence .CarriedEvidence}}{{else}}—{{end}}</td>
       </tr>
       {{end}}
     </tbody>

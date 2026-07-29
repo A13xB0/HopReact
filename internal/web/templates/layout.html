@@ -136,15 +136,49 @@ tr:last-child td{border-bottom:0}
 
 @media(max-width:720px){
   main,footer{padding:1rem .85rem}
+  header{padding:.7rem .85rem}
   .node{grid-template-columns:1fr}
   .node-actions{align-items:stretch}
   .node-actions form{width:100%}
   .relay-opt{max-width:none}
   .rule{grid-template-columns:1fr}
-  table,thead,tbody,tr,th,td{display:block}
+
+  /* Tables become stacked cards. The header row goes with them, so every
+     cell has to carry its own label or the values are unreadable — a column
+     of "—", "2h ago", "47" says nothing about which is which. */
+  table,tbody,tr,td{display:block}
   thead{display:none}
   tr{border:1px solid var(--border);border-radius:10px;margin-bottom:.7rem;padding:.6rem}
-  td{border:0;padding:.3rem .35rem}
+  td{border:0;padding:.3rem .35rem;display:flex;gap:.6rem;align-items:baseline}
+  td[data-label]::before{
+    content:attr(data-label);flex:0 0 8.5rem;color:var(--dim);
+    font-size:.7rem;text-transform:uppercase;letter-spacing:.04em;
+    line-height:1.5}
+  td[data-label=""]{display:block}
+  td[data-label=""]::before{display:none}
+
+  /* Most payload types have never been seen for a given node. Eight empty
+     cards saying "never" three times each is a wall to scroll past before
+     reaching the rows that mean something, so they collapse to one line. */
+  tr.empty{padding:.2rem .6rem;opacity:.55}
+  tr.empty td{padding:.15rem .35rem}
+  tr.empty td:not(:first-child){display:none}
+  /* No column label on a collapsed row: there is only one value left, so the
+     label is noise — and it would squeeze the type name into a wrap. */
+  tr.empty td:first-child::before{display:none}
+  tr.empty td:first-child::after{content:" — not seen";color:var(--dim);font-size:.72rem}
+
+  /* Touch targets. A 13px checkbox and a 20px summary are not tappable
+     things; these are the sizes a thumb can actually hit. */
+  button,.btn{min-height:44px;padding:.6rem 1rem}
+  button.chip{min-height:36px}
+  input,select{min-height:44px}
+  input[type=checkbox]{width:20px;height:20px;min-height:20px}
+  .tcheck{min-height:44px;padding:.35rem .6rem}
+  .relay-opt{padding:.35rem 0}
+  details.edit summary,details summary{padding:.5rem 0;min-height:32px}
+  .field{white-space:normal}
+  .searchbar input[type=search]{min-height:44px}
 }
 </style>
 </head><body>
