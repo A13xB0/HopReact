@@ -201,10 +201,14 @@ func TestBoardShowsAVerdictAndHover(t *testing.T) {
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/status", nil))
 	body := rec.Body.String()
 
-	// A repeater is not a critical group, so one dead one is a partial
-	// outage rather than a major one.
-	if !strings.Contains(body, "Partial outage") {
+	// An ordinary repeater is not a critical group. With the services and
+	// the backbone fine, one dead repeater is degradation, not an outage —
+	// on a mesh of seventy, one is nearly always having a bad day.
+	if !strings.Contains(body, "Degraded") {
 		t.Error("the headline should say what is wrong")
+	}
+	if strings.Contains(body, "outage") {
+		t.Error("nothing critical is down, so this is not an outage")
 	}
 	if !strings.Contains(body, "not active") {
 		t.Error("the row should carry its verdict")
@@ -328,5 +332,70 @@ func TestZeroStaleDaysKeepsEverything(t *testing.T) {
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/status", nil))
 	if !strings.Contains(rec.Body.String(), "Long Gone") {
 		t.Error("with the cutoff disabled, nothing should be dropped")
+	}
+}
+
+// Only the critical groups can declare an outage. Seventy repeaters means
+// one is nearly always unwell, and a board that calls that an outage is one
+// people stop reading.
+func TestOnlyCriticalGroupsCauseAnOutage(t *testing.T) {
+	srv, st, h := statusServer(t, nil)
+	srv.Region = region(t)
+	ctx := context.Background()
+	lat, lon := 56.5, -3.5
+	if _, err := st.UpsertTargets(ctx, []corescope.Observation{
+		// Backbone, healthy.
+		{Kind: corescope.KindNode, Key: "aa", Name: "Backbone", Role: "repeater",
+			LastSeen: t0.Add(-time.Minute), Lat: &lat, Lon: &lon, BridgeScore: 0.4},
+		// Ordinary, long dead.
+		{Kind: corescope.KindNode, Key: "bb", Name: "Ordinary Dead", Role: "repeater",
+			LastSeen: t0.Add(-48 * time.Hour), Lat: &lat, Lon: &lon},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/status", nil))
+	if body := rec.Body.String(); strings.Contains(body, "outage") {
+		t.Error("with services and backbone green, a dead ordinary repeater is not an outage")
+	}
+}
+
+// The scores describe the mesh as it is; an operator knows things it does
+// not, so a repeater can be named as backbone regardless of what it scores.
+func TestCoreKeysOverrideTheScores(t *testing.T) {
+	srv, st, h := statusServer(t, nil)
+	srv.Region = region(t)
+	// West Lomond's real numbers: below both thresholds, but the operator
+	// says it is backbone.
+	srv.Cfg.Status.CoreKeys = []string{"02f1fec873"}
+	ctx := context.Background()
+	lat, lon := 56.5, -3.5
+	if _, err := st.UpsertTargets(ctx, []corescope.Observation{
+		{Kind: corescope.KindNode, Key: "02f1fec873882058aa", Name: "West Lomond",
+			Role: "repeater", LastSeen: t0.Add(-time.Minute), Lat: &lat, Lon: &lon,
+			BridgeScore: 0.03, TrafficShare: 0.28},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/status", nil))
+	body := rec.Body.String()
+
+	core := body[strings.Index(body, "Core repeaters"):]
+	core = core[:strings.Index(core, "Observers")]
+	if !strings.Contains(core, "West Lomond") {
+		t.Error("a pinned repeater belongs in the core section whatever it scores")
+	}
+	if !strings.Contains(body, "marked core") {
+		t.Error("the board should say the placement was a choice, not a score")
+	}
+	if !isPinnedCore("02F1FEC873882058AA", []string{"02f1fec873"}) {
+		t.Error("matching should be case-insensitive and by prefix, so a short hash works")
+	}
+	if isPinnedCore("aabbcc", []string{"02f1fec873"}) {
+		t.Error("a different node must not be pinned")
+	}
+	if isPinnedCore("aabbcc", []string{"", "  "}) {
+		t.Error("blank entries must not match everything")
 	}
 }

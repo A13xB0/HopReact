@@ -159,6 +159,13 @@ status:
   # repeaters — about the right size for a backbone list.
   core_bridge_score: 0.2
   core_traffic_share: 0.3
+  # Repeaters that count as backbone whatever they score. The scores describe
+  # the mesh as it is; you know things it doesn't — a hilltop site everything
+  # will lean on once the next few nodes appear, or one that looks quiet today
+  # only because its neighbours are down. Matched as a case-insensitive prefix
+  # of the public key, so a short hash is enough.
+  core_keys: []
+  #  - "02f1fec873"   # West Lomond
 
   # Services the mesh depends on that cannot be inferred from packets.
   # Probed on a timer and cached, so a public page never becomes a request

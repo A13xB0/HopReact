@@ -343,9 +343,13 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		}
 		row.rank = rankOf(row.Status.Class)
 
-		if t.BridgeScore >= c.CoreBridgeScore || t.TrafficShare >= c.CoreTrafficShare {
+		pinned := isPinnedCore(t.Key, c.CoreKeys)
+		if pinned || t.BridgeScore >= c.CoreBridgeScore || t.TrafficShare >= c.CoreTrafficShare {
 			row.Detail = fmt.Sprintf("bridge %.0f%% · traffic %.0f%%",
 				t.BridgeScore*100, t.TrafficShare*100)
+			if pinned {
+				row.Detail += " · marked core"
+			}
 			core.tally(row)
 		} else {
 			repeaters.tally(row)
@@ -394,20 +398,39 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	s.render(w, "status.html", d)
 }
 
+// isPinnedCore reports whether an operator has named this repeater as
+// backbone regardless of its scores.
+func isPinnedCore(key string, pinned []string) bool {
+	k := strings.ToLower(key)
+	for _, p := range pinned {
+		p = strings.ToLower(strings.TrimSpace(p))
+		if p != "" && strings.HasPrefix(k, p) {
+			return true
+		}
+	}
+	return false
+}
+
 // verdict turns the groups into one headline.
+//
+// Only the critical groups — the services everything reports through, and
+// the backbone repeaters — can put the mesh into an outage. Everything else
+// is degradation. Seventy repeaters means one is nearly always having a bad
+// day, and a board that calls that an outage is a board people stop reading.
 func verdict(groups []statusGroup) (string, string) {
-	var criticalDown, anyDown, anyWarn bool
+	var criticalDown, criticalWarn, otherTrouble bool
 	total := 0
 	for _, g := range groups {
 		total += g.Total
-		if g.Late > 0 {
-			anyDown = true
-			if g.Critical {
-				criticalDown = true
-			}
-		}
-		if g.Concern > 0 || g.Quiet > 0 {
-			anyWarn = true
+		trouble := g.Late > 0
+		warn := g.Concern > 0 || g.Quiet > 0
+		switch {
+		case g.Critical && trouble:
+			criticalDown = true
+		case g.Critical && warn:
+			criticalWarn = true
+		case trouble || warn:
+			otherTrouble = true
 		}
 	}
 	switch {
@@ -415,9 +438,9 @@ func verdict(groups []statusGroup) (string, string) {
 		return "Nothing to report yet", "muted"
 	case criticalDown:
 		return "Major outage", "bad"
-	case anyDown:
+	case criticalWarn:
 		return "Partial outage", "orange"
-	case anyWarn:
+	case otherTrouble:
 		return "Degraded", "amber"
 	}
 	return "All systems operational", "good"

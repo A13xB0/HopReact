@@ -109,6 +109,12 @@ type StatusConfig struct {
 	// for a backbone list.
 	CoreBridgeScore  float64 `yaml:"core_bridge_score"`
 	CoreTrafficShare float64 `yaml:"core_traffic_share"`
+	// CoreKeys names repeaters that count as backbone whatever they score.
+	// The scores describe the mesh as it is; an operator knows things it
+	// doesn't — a hilltop site everything will depend on once the next few
+	// nodes appear, or one that is quiet today because its neighbours are
+	// down. Matched as a case-insensitive prefix, so a short hash is enough.
+	CoreKeys []string `yaml:"core_keys"`
 
 	// Services are the dependencies HopReact cannot infer from packets: the
 	// MQTT broker observers report through, and whatever runs beside it.
