@@ -25,7 +25,7 @@
   <h3>Gone quiet in the last {{$s.RecentHrs}} hours</h3>
   <div class="list">
     {{range $s.Recent}}
-    <div class="rrow" title="{{.Status.Why}}">
+    <div class="rrow" data-tip="{{.Status.Why}}" tabindex="0">
       <i class="s-{{.Status.Class}}"></i>
       <b>{{.Name}}</b>
       <span class="small">last seen {{since .Status.Since $s.Now}}</span>
@@ -47,10 +47,13 @@
 
   <div class="svc-list">
     {{range .Rows}}
-    <div class="svc" title="{{.Status.Why}}">
+    {{/* tabindex makes the explanation reachable without a mouse — the
+         tooltip opens on focus as well as hover. */}}
+    <div class="svc" data-tip="{{.Status.Why}}" tabindex="0">
       <span class="svc-dot s-{{.Status.Class}}"></span>
       <div class="svc-name">
-        <b>{{.Name}}</b>
+        {{if .Link}}<a href="{{.Link}}" target="_blank" rel="noopener">{{.Name}}</a>
+        {{else}}<b>{{.Name}}</b>{{end}}
         {{if .Detail}}<span class="small">{{.Detail}}</span>{{end}}
       </div>
       <span class="chip chip-{{.Status.Class}}"><i></i>{{.Status.Label}}</span>

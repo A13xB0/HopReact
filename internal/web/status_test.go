@@ -484,3 +484,78 @@ func TestCoreMembershipLapsesEventually(t *testing.T) {
 		t.Error("a repeater unimportant for a month should have lapsed out of the core group")
 	}
 }
+
+// A name is a way through to the detail, not a dead end.
+func TestNamesLinkIntoCoreScope(t *testing.T) {
+	srv, st, h := statusServer(t, nil)
+	srv.Cfg.CoreScope.APIURL = "https://corescope.example/"
+	ctx := context.Background()
+	const key = "463f15467ceba721cf903a33e0da069627d86ddfa21f397a14a128fa166d8976"
+	if _, err := st.UpsertTargets(ctx, []corescope.Observation{
+		{Kind: corescope.KindNode, Key: key, Name: "Linked Repeater", Role: "repeater",
+			LastSeen: t0.Add(-time.Minute)},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/status", nil))
+	body := rec.Body.String()
+
+	want := "https://corescope.example/#/nodes/" + key
+	if !strings.Contains(body, want) {
+		t.Errorf("the name should link to the node's CoreScope page (%s)", want)
+	}
+	// Off-site links open in a new tab, and must not hand the opener over.
+	if !strings.Contains(body, `rel="noopener"`) {
+		t.Error("external links need rel=noopener")
+	}
+	if nodeLink("", key) != "" {
+		t.Error("no CoreScope configured should mean no link, not a broken one")
+	}
+}
+
+// The explanations have to be reachable, and the browser's own title tooltip
+// is neither quick nor keyboard-accessible.
+func TestExplanationsAreHoverableAndFocusable(t *testing.T) {
+	_, st, h := statusServer(t, nil)
+	ctx := context.Background()
+	if _, err := st.UpsertTargets(ctx, []corescope.Observation{
+		{Kind: corescope.KindNode, Key: "aa", Name: "Some Repeater", Role: "repeater",
+			LastSeen: t0.Add(-time.Minute)},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/status", nil))
+	body := rec.Body.String()
+
+	if !strings.Contains(body, "data-tip=") {
+		t.Error("rows should carry their explanation as a tooltip")
+	}
+	if !strings.Contains(body, `tabindex="0"`) {
+		t.Error("the explanation must be reachable from a keyboard, not hover-only")
+	}
+	if strings.Contains(body, `class="svc" title=`) {
+		t.Error("the slow native tooltip should have been replaced, not doubled up")
+	}
+}
+
+// A service name should lead to the service, not to the endpoint we happen
+// to probe — /healthz and /api/observers are machine addresses.
+func TestServiceLinksToItsOriginNotItsProbe(t *testing.T) {
+	srv, _, h := statusServer(t, nil)
+	srv.Health = &health.Monitor{Checks: []health.Check{
+		{Name: "CoreScope", Target: "https://corescope.example/api/observers"},
+	}, Timeout: time.Second}
+	srv.Health.Probe(contextWithTimeout(t))
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/status", nil))
+	body := rec.Body.String()
+	if !strings.Contains(body, `href="https://corescope.example"`) {
+		t.Error("a service should link to its origin")
+	}
+	if strings.Contains(body, `href="https://corescope.example/api/observers"`) {
+		t.Error("the probe path is not a page for a human to visit")
+	}
+}

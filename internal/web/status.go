@@ -3,6 +3,7 @@ package web
 import (
 	"fmt"
 	"net/http"
+	"net/url"
 	"sort"
 	"time"
 
@@ -39,8 +40,11 @@ type statusState struct {
 }
 
 type statusRow struct {
-	Name   string
-	Key    string
+	Name string
+	Key  string
+	// Link points at more detail: a node's CoreScope page, or a service's
+	// own address.
+	Link   string
 	Status statusState
 	// Detail is a short qualifier shown beside the name — a backbone
 	// repeater's scores, or an observer's role.
@@ -134,6 +138,8 @@ type statusPage struct {
 	// partial outage.
 	Verdict string
 	Class   string
+	// CoreScopeURL is the instance node names link into.
+	CoreScopeURL string
 }
 
 // Pct is a band's share of the bar.
@@ -233,6 +239,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		QuietHrs:  c.QuietHours, ConcernHrs: c.ConcernHours,
 		AlarmHrs: c.AlarmHours, RecentHrs: c.RecentHours,
 	}
+	page.CoreScopeURL = strings.TrimRight(s.Cfg.CoreScope.APIURL, "/")
 	fh := s.feedHealth(r)
 	page.FeedOK, page.FeedReason, page.Updated = fh.Healthy, fh.Reason, fh.LastOK
 
@@ -258,7 +265,16 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		if res.OK && res.Latency > 0 {
 			detail = fmt.Sprintf("%s · %dms", res.Target, res.Latency.Milliseconds())
 		}
-		services.tally(statusRow{Name: res.Name, Detail: detail, Status: st})
+		// Link to the service itself, not to whatever endpoint we happen to
+		// probe: /api/observers and /healthz are machine addresses, and a
+		// reader clicking a service name wants the thing, not its pulse.
+		link := ""
+		if res.Kind != "tcp" {
+			if u, err := url.Parse(res.Target); err == nil && u.Host != "" {
+				link = u.Scheme + "://" + u.Host
+			}
+		}
+		services.tally(statusRow{Name: res.Name, Detail: detail, Status: st, Link: link})
 	}
 
 	core := statusGroup{
@@ -315,6 +331,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 			if !t.LastPacket.IsZero() {
 				row.Detail = "last heard traffic " + humanSince(t.LastPacket, now)
 			}
+			row.Link = nodeLink(page.CoreScopeURL, t.Key)
 			row.rank = rankOf(st.Class)
 			observers.tally(row)
 			continue
@@ -342,6 +359,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 			row.Name = shortKey(t.Key)
 		}
 		row.rank = rankOf(row.Status.Class)
+		row.Link = nodeLink(page.CoreScopeURL, t.Key)
 
 		pinned := isPinnedCore(t.Key, c.CoreKeys)
 		scores := t.BridgeScore >= c.CoreBridgeScore || t.TrafficShare >= c.CoreTrafficShare
@@ -408,6 +426,16 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	d := s.page(r, page.Title)
 	d.Status = &page
 	s.render(w, "status.html", d)
+}
+
+// nodeLink points at a node's page on the CoreScope instance this board is
+// built from, so a name is a way through to the detail rather than a dead
+// end. Empty when there is no instance configured.
+func nodeLink(base, key string) string {
+	if base == "" || key == "" {
+		return ""
+	}
+	return base + "/#/nodes/" + url.PathEscape(key)
 }
 
 // isPinnedCore reports whether an operator has named this repeater as
