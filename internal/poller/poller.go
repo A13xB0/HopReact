@@ -427,6 +427,15 @@ func (p *Poller) evaluate(ctx context.Context, now time.Time, snap corescope.Sna
 	err = p.Store.WriteTx(ctx, func(tx *sql.Tx) error {
 		for _, pl := range planned {
 			if !pl.out.Changed {
+				// Not a transition, but the signal's timestamp may still have
+				// advanced — persist it so the "last seen" shown on the watch
+				// page tracks reality instead of freezing at the last state
+				// change. No event, no notification: nothing happened.
+				if pl.out.ObservedMoved {
+					if err := p.Store.SaveWatchState(ctx, tx, pl.out.State); err != nil {
+						return err
+					}
+				}
 				continue
 			}
 			if err := p.Store.SaveWatchState(ctx, tx, pl.out.State); err != nil {

@@ -768,3 +768,57 @@ func TestBackfillRereadsAfterTheCursorIsRepaired(t *testing.T) {
 		t.Errorf("the known packet was counted %d times, want at most 1", a.EvidenceCount)
 	}
 }
+
+// The "last seen" a rule shows must track a healthy target between polls,
+// not freeze at the moment the rule settled into OK. Only the timestamp
+// moves: the state stays OK and nobody is messaged.
+func TestObservedAtTracksHealthyTarget(t *testing.T) {
+	h := newHarness(t, nil)
+	h.scope.setNodes(h.now, 200, 10*time.Minute)
+	id := h.watch(t, key(0), 6)
+	h.poll(t)
+
+	// The backstop rule reads CoreScope's own last_seen, so it is the one
+	// with a reading here; the per-type rule stays unknown without
+	// attributable packets, which is its own tested behaviour.
+	var ruleID int64
+	rules, err := h.st.RulesForWatch(context.Background(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range rules {
+		if r.Source == store.SourceSeen {
+			ruleID = r.ID
+		}
+	}
+	states, err := h.st.AllWatchState(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st := states[id][ruleID]; st.State != store.StateOK {
+		t.Fatalf("backstop = %q, want OK before the point of the test", st.State)
+	}
+
+	// Half an hour on, the node has been heard again — still nowhere near
+	// the threshold, so nothing about the state changes.
+	h.now = h.now.Add(30 * time.Minute)
+	h.scope.setNodes(h.now, 200, time.Minute)
+	h.poll(t)
+
+	states, err = h.st.AllWatchState(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := h.now.Add(-time.Minute)
+	st := states[id][ruleID]
+	if st.State != store.StateOK {
+		t.Errorf("backstop = %q, want still OK", st.State)
+	}
+	if !st.ObservedAt.Equal(want) {
+		t.Errorf("observed_at = %v, want the fresh reading %v — it must not freeze while OK",
+			st.ObservedAt, want)
+	}
+	if n := h.queued(t); len(n) != 0 {
+		t.Fatalf("timestamp housekeeping queued %d notifications", len(n))
+	}
+}

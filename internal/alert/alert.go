@@ -67,6 +67,15 @@ type Outcome struct {
 	Kind     string // "alert" or "recovered"
 	Changed  bool   // state differs from the input, so it is worth persisting
 	Entering bool   // this transition enters alerting; the breaker counts these
+	// ObservedMoved is set when the signal's timestamp moved without any
+	// state change — a healthy node being heard again, still comfortably
+	// inside its threshold. The caller should persist State so the "last
+	// seen" it shows people stays true, but this is NOT a transition: no
+	// event is recorded and nobody is notified. Before this flag, a rule
+	// sitting in OK froze its observed_at at the moment it settled there,
+	// and the page said "OK" over a timestamp drifting further into the
+	// past every day.
+	ObservedMoved bool
 }
 
 // Kinds of notification.
@@ -101,6 +110,7 @@ func Evaluate(now time.Time, obs Observation, cur store.WatchState, threshold ti
 
 	next := cur
 	next.ObservedAt = obs.At
+	moved := !next.ObservedAt.Equal(cur.ObservedAt)
 
 	// Nothing to judge. Note this deliberately does not clear NotifyCount:
 	// if a target drops out of the feed mid-alert and comes back, we still
@@ -112,7 +122,7 @@ func Evaluate(now time.Time, obs Observation, cur store.WatchState, threshold ti
 			next.Consecutive = 0
 			return Outcome{State: next, Changed: true}
 		}
-		return Outcome{State: next}
+		return Outcome{State: next, ObservedMoved: moved}
 	}
 
 	over := now.Sub(obs.At) >= threshold
@@ -137,7 +147,7 @@ func Evaluate(now time.Time, obs Observation, cur store.WatchState, threshold ti
 	case store.StateOK:
 		if !over {
 			next.Consecutive = 0
-			return Outcome{State: next}
+			return Outcome{State: next, ObservedMoved: moved}
 		}
 		next.State = store.StatePending
 		next.Since = now
@@ -167,7 +177,7 @@ func Evaluate(now time.Time, obs Observation, cur store.WatchState, threshold ti
 			// Still down. Say nothing — this is the rule that keeps a
 			// week-long outage to a single message.
 			next.Consecutive = 0
-			return Outcome{State: next}
+			return Outcome{State: next, ObservedMoved: moved}
 		}
 		next.State = store.StateRecovering
 		next.Since = now

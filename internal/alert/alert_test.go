@@ -407,3 +407,49 @@ func TestRecoveryPreferenceDoesNotAffectAlerting(t *testing.T) {
 		t.Errorf("Notify=%v Kind=%q, want the alert to still be sent", out.Notify, out.Kind)
 	}
 }
+
+// A healthy signal being heard again is not a transition, but the timestamp
+// people see must still track it. Before ObservedMoved existed, a rule
+// sitting in OK froze its observed_at at the moment it settled there, and
+// the watch page said "OK" over a "last seen" drifting further into the
+// past every day.
+func TestOKStayingOKReportsObservedMovement(t *testing.T) {
+	cur := okState()
+	cur.ObservedAt = t0.Add(-time.Hour)
+
+	out := Evaluate(t0, Observation{At: t0.Add(-time.Minute), Applicable: true},
+		cur, threshold, Prefs{NotifyRecovery: true}, pol(1))
+	if out.Changed || out.Notify {
+		t.Fatalf("a timestamp advancing inside the threshold is not a transition: %+v", out)
+	}
+	if !out.ObservedMoved {
+		t.Error("ObservedMoved must be set so the caller persists the new timestamp")
+	}
+	if !out.State.ObservedAt.Equal(t0.Add(-time.Minute)) {
+		t.Errorf("ObservedAt = %v, want the fresh reading", out.State.ObservedAt)
+	}
+
+	// The same reading again: nothing moved, nothing worth persisting.
+	again := Evaluate(t0.Add(5*time.Minute),
+		Observation{At: t0.Add(-time.Minute), Applicable: true},
+		out.State, threshold, Prefs{NotifyRecovery: true}, pol(1))
+	if again.Changed || again.ObservedMoved {
+		t.Errorf("an unchanged reading should persist nothing: %+v", again)
+	}
+}
+
+// The same holds mid-outage: a node down for a week whose last-heard reading
+// shifts (a late observation arriving upstream) updates the timestamp
+// without re-alerting.
+func TestAlertingStayingDownReportsObservedMovement(t *testing.T) {
+	cur := store.WatchState{State: store.StateAlerting, Since: t0, ObservedAt: t0.Add(-30 * time.Hour), NotifyCount: 1}
+
+	out := Evaluate(t0, Observation{At: t0.Add(-20 * time.Hour), Applicable: true},
+		cur, threshold, Prefs{NotifyRecovery: true}, pol(1))
+	if out.Changed || out.Notify {
+		t.Fatalf("still over threshold must stay a silent non-transition: %+v", out)
+	}
+	if !out.ObservedMoved {
+		t.Error("ObservedMoved must be set for the shifted reading")
+	}
+}
