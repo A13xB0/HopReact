@@ -787,3 +787,60 @@ func TestActivityDoesNotGrowWithTraffic(t *testing.T) {
 		t.Errorf("LastAt = %v, want the newest", acts[0].LastAt)
 	}
 }
+
+// A new watch starts with the SAME ready-made rules its settings page
+// offers — the chosen template's tuned rule plus the backstop — so the two
+// lists can never drift apart again.
+func TestCreateWatchSeedsChosenTemplate(t *testing.T) {
+	s, _ := testStore(t)
+	ctx := context.Background()
+	if _, err := s.UpsertTargets(ctx, []corescope.Observation{node("aa", base.Add(-time.Minute), time.Time{})}); err != nil {
+		t.Fatal(err)
+	}
+	u, _ := s.UpsertUser(ctx, "d1", "alice", "")
+
+	// No explicit hours: the template's tuned threshold governs.
+	id, err := s.CreateWatch(ctx, Watch{
+		UserID: u.ID, TargetKind: "node", TargetKey: "aa", TemplateID: "adverts",
+	}, 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rules, err := s.RulesForWatch(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rules) != 2 {
+		t.Fatalf("got %d rules, want the template rule and the backstop", len(rules))
+	}
+	if rules[0].Label != "Adverts only" || rules[0].ThresholdHours != 25 {
+		t.Errorf("first rule = %q at %dh, want the Adverts only template at its tuned 25h",
+			rules[0].Label, rules[0].ThresholdHours)
+	}
+	if rules[1].Label != "Not heard at all" || rules[1].ThresholdHours != 25 {
+		t.Errorf("backstop = %q at %dh, want it at the template's threshold",
+			rules[1].Label, rules[1].ThresholdHours)
+	}
+}
+
+// A template for the wrong kind of target must not seed rules that can never
+// fire; the kind's own default governs instead.
+func TestCreateWatchWrongKindTemplateFallsBack(t *testing.T) {
+	s, _ := testStore(t)
+	ctx := context.Background()
+	u, _ := s.UpsertUser(ctx, "d1", "alice", "")
+
+	id, err := s.CreateWatch(ctx, Watch{
+		UserID: u.ID, TargetKind: "observer", TargetKey: "obs1", TemplateID: "adverts",
+	}, 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rules, err := s.RulesForWatch(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rules) != 1 || rules[0].Label != "Standard observer" || rules[0].Source != SourceSeen {
+		t.Errorf("rules = %+v, want only the Standard observer template", rules)
+	}
+}

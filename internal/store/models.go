@@ -53,7 +53,12 @@ type Watch struct {
 	TargetKind     string
 	TargetKey      string
 	ThresholdHours int
-	AlertOnRelay   bool
+	// TemplateID names the ready-made rule this watch starts with. Only
+	// consulted at creation, never stored: the rules it expands to are.
+	// Empty means the kind's default template; an explicit ThresholdHours
+	// overrides the template's tuned one.
+	TemplateID   string
+	AlertOnRelay bool
 	Label          string
 	MutedUntil     time.Time
 	// NotifyRecovery controls the "back online" message. On by default: you

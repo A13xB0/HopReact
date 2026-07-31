@@ -493,9 +493,9 @@ func TestWatchDetailRenders(t *testing.T) {
 	body := rec.Body.String()
 	for _, want := range []string{
 		"Ben Nevis",
-		"Adverts, responses or channel messages", // the default per-type rule
-		"Not heard at all",                       // the backstop
-		"ADVERT", "GRP_TXT",                      // the activity table
+		"Standard",          // the default template rule a new watch starts with
+		"Not heard at all",  // the backstop
+		"ADVERT", "GRP_TXT", // the activity table
 		"Add a rule",
 	} {
 		if !strings.Contains(body, want) {
@@ -877,15 +877,17 @@ func TestTemplateAddsTheAdvertisedRule(t *testing.T) {
 	cookie, csrf, u := signIn(t, srv, st)
 	id := addWatch(t, st, u.ID, "aa")
 
+	// Named explicitly: the seeded default rule is ALSO the Standard template
+	// now, so the template's own name would collide with it.
 	rec := postForm(t, h, cookie, "/watches/"+itoa(id)+"/rules", url.Values{
-		"csrf_token": {csrf}, "template": {"standard"},
+		"csrf_token": {csrf}, "template": {"standard"}, "label": {"Second standard"},
 		"threshold_hours": {"99"}, // must be ignored
 	})
 	if rec.Code != http.StatusSeeOther {
 		t.Fatalf("status %d", rec.Code)
 	}
 
-	got := ruleByLabel(t, st, id, "Standard")
+	got := ruleByLabel(t, st, id, "Second standard")
 	if got.ThresholdHours != 12 {
 		t.Errorf("threshold = %d, want the template's 12 rather than the form's 99", got.ThresholdHours)
 	}
@@ -1038,8 +1040,8 @@ func TestObserverDefaultsToCheckingIn(t *testing.T) {
 	if rules[0].ThresholdHours != 1 {
 		t.Errorf("threshold = %d, want 1", rules[0].ThresholdHours)
 	}
-	if rules[0].Label != "Stopped checking in" {
-		t.Errorf("label = %q", rules[0].Label)
+	if rules[0].Label != "Standard observer" {
+		t.Errorf("label = %q, want the Standard observer template", rules[0].Label)
 	}
 }
 

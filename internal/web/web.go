@@ -96,6 +96,7 @@ func New(st *store.Store, dc *discord.Client, cfg config.Config, log *slog.Logge
 		"typeFromRp": typeFromRepeater,
 		"add":        func(a, b int) int { return a + b },
 		"stdTypes":   statusTypeNames,
+		"tmplFor":    templatesFor,
 	}
 	pages := map[string]*template.Template{}
 	for _, page := range []string{"index.html", "watches.html", "search.html", "watch.html", "status.html"} {
@@ -277,7 +278,7 @@ type pageData struct {
 	Watch      *store.WatchView
 	Activity   []activityRow
 	Groups     []typeGroup
-	Templates  []ruleTemplate
+	Templates  []store.RuleTemplate
 	Results    []store.Target
 	Query      string
 	FeedHealth feedHealth
@@ -307,94 +308,13 @@ var typeGroups = []typeGroup{
 	{"Other", "Anything custom.", []int{corescope.TypeRAWCustom}},
 }
 
-// ruleTemplate is a ready-made rule offered as one click, so the common case
-// doesn't mean ticking ten boxes.
-//
-// Defined here rather than as hidden fields in the page: the type list lives
-// in exactly one place, and a template can be adjusted later without every
-// rendered form disagreeing with the server about what it means. Applying one
-// stores the expanded types like any other rule, so changing a template never
-// rewrites what someone is already being alerted on.
-type ruleTemplate struct {
-	ID   string
-	Name string
-	Note string
-	// Kind restricts a template to one sort of target. An observer has no
-	// packet types to watch and a node has no check-in, so offering either
-	// template on the wrong page would just be a control that cannot work.
-	Kind           string
-	Source         store.Source
-	Types          []int
-	Direction      store.Direction
-	ThresholdHours int
-}
-
-var ruleTemplates = []ruleTemplate{
-	{
-		ID:     "standard-observer",
-		Name:   "Standard observer",
-		Kind:   string(corescope.KindObserver),
-		Source: store.SourceSeen,
-		Note: "Alerts if the station hasn't checked in for an hour — its last status on CoreScope. " +
-			"This is the right question for an observer: whether it has HEARD anything depends on how busy the mesh around it is, not on whether it's working.",
-		Direction:      store.DirEither,
-		ThresholdHours: 1,
-	},
-	{
-		ID:   "standard",
-		Kind: string(corescope.KindNode),
-		Name: "Standard",
-		Note: "Everything a repeater either sends itself or genuinely carries, at 12 hours. Leaves out requests aimed AT the repeater, traces (which never identify one), and neighbour discovery (which never travels far enough to be heard).",
-		Types: []int{
-			corescope.TypeRESPONSE, corescope.TypeTXTMsg, corescope.TypeACK,
-			corescope.TypeADVERT, corescope.TypeGRPTXT, corescope.TypePATH,
-		},
-		Direction:      store.DirEither,
-		ThresholdHours: 12,
-	},
-	{
-		ID:   "adverts",
-		Kind: string(corescope.KindNode),
-		Name: "Adverts only",
-		Note: "The most reliable heartbeat: a node states its own key in an advert, so this never depends on route hashes. " +
-			"A day and an hour, so a node that adverts daily gets some slack before this complains.",
-		Types:          []int{corescope.TypeADVERT},
-		Direction:      store.DirEither,
-		ThresholdHours: 25,
-	},
-	{
-		ID:   "traffic",
-		Kind: string(corescope.KindNode),
-		Name: "Carrying traffic",
-		Note: "Only counts messages this node passed on for other people, which is the job a repeater is actually there to do.",
-		Types: []int{
-			corescope.TypeTXTMsg, corescope.TypeGRPTXT,
-			corescope.TypeGRPData, corescope.TypeMULTIPART,
-		},
-		Direction:      store.DirCarried,
-		ThresholdHours: 12,
-	},
-}
-
-func templateByID(id string) (ruleTemplate, bool) {
-	for _, t := range ruleTemplates {
-		if t.ID == id {
-			return t, true
-		}
-	}
-	return ruleTemplate{}, false
-}
+// The ready-made rule templates live in the store package
+// (store.RuleTemplates) so that a freshly created watch and the watch page's
+// "ready-made rules" menu can never drift apart — both read the same list.
+func templateByID(id string) (store.RuleTemplate, bool) { return store.TemplateByID(id) }
 
 // templatesFor returns the templates that make sense for one kind of target.
-func templatesFor(kind string) []ruleTemplate {
-	var out []ruleTemplate
-	for _, t := range ruleTemplates {
-		if t.Kind == "" || t.Kind == kind {
-			out = append(out, t)
-		}
-	}
-	return out
-}
+func templatesFor(kind string) []store.RuleTemplate { return store.TemplatesFor(kind) }
 
 // typeFact describes one payload type: who puts it on the air, and how much
 // it is worth as evidence that a repeater is alive.
@@ -765,10 +685,6 @@ func (s *Server) handleAddWatch(w http.ResponseWriter, r *http.Request) {
 	}
 	kind := r.PostFormValue("kind")
 	key := strings.ToLower(strings.TrimSpace(r.PostFormValue("key")))
-	hours, _ := strconv.Atoi(r.PostFormValue("threshold_hours"))
-	if hours < config.MinThresholdHours {
-		hours = config.MinThresholdHours
-	}
 	if kind != "node" && kind != "observer" {
 		redirectFlash(w, r, "/search", "That target type isn't valid.", "error")
 		return
@@ -777,9 +693,18 @@ func (s *Server) handleAddWatch(w http.ResponseWriter, r *http.Request) {
 		redirectFlash(w, r, "/search", "Pick a node or observer to watch.", "error")
 		return
 	}
+	// The form offers the same ready-made rules the watch page does, and the
+	// template's tuned threshold governs. An explicit threshold_hours is still
+	// honoured when a form sends one, clamped to the floor as ever; zero means
+	// "the template knows best".
+	hours, _ := strconv.Atoi(r.PostFormValue("threshold_hours"))
+	if hours != 0 && hours < config.MinThresholdHours {
+		hours = config.MinThresholdHours
+	}
 
 	_, err := s.Store.CreateWatch(r.Context(), store.Watch{
 		UserID: u.ID, TargetKind: kind, TargetKey: key,
+		TemplateID:     r.PostFormValue("template"),
 		ThresholdHours: hours,
 		AlertOnRelay:   r.PostFormValue("alert_on_relay") == "on",
 		// On by default: being told a node is back is the other half of being
@@ -937,13 +862,11 @@ func (s *Server) handleAddRule(w http.ResponseWriter, r *http.Request) {
 			redirectFlash(w, r, dest, "That ready-made rule doesn't apply to this kind of target.", "error")
 			return
 		}
-		rule.Source = t.Source
-		if rule.Source == "" {
-			rule.Source = store.SourceTypes
-		}
-		rule.Types = t.Types
-		rule.Direction = t.Direction
-		rule.ThresholdHours = t.ThresholdHours
+		tr := t.Rule()
+		rule.Source = tr.Source
+		rule.Types = tr.Types
+		rule.Direction = tr.Direction
+		rule.ThresholdHours = tr.ThresholdHours
 		if rule.Label == "" {
 			rule.Label = t.Name
 		}

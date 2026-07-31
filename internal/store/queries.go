@@ -327,38 +327,35 @@ var ErrWatchLimit = errors.New("store: watch limit reached")
 // ErrDuplicateWatch is returned when this user already watches this target.
 var ErrDuplicateWatch = errors.New("store: already watching this target")
 
-// DefaultRules returns the rules a newly created watch starts with.
+// DefaultRules returns the rules a newly created watch starts with: the
+// chosen ready-made template — the SAME templates the watch page offers
+// afterwards, so what a watch begins with is always something its settings
+// page could have produced — plus, for nodes, the safety backstop.
 //
-// Observers get CoreScope's plain "heard at all". They never appear in packet
-// routes — an observer reports what it hears rather than forwarding it — so
-// per-type attribution has nothing to say about one.
-//
-// Nodes get the per-type default: adverts, responses and channel messages,
-// counting both traffic the node originated and traffic it carried. Adverts
-// anchor that set deliberately. A node states its own public key outright in
-// an advert, so that part of the signal needs no path hashes at all and
-// cannot be starved by a run of narrow hop widths.
-func DefaultRules(kind string, thresholdHours int, alertOnRelay bool) []Rule {
-	if kind == string(corescope.KindObserver) {
-		// An observer's own check-in, not what it has heard. Whether it hears
-		// anything depends on how busy the mesh around it is; whether it
-		// checks in depends on whether it is working.
-		return []Rule{{
-			Label: "Stopped checking in", Source: SourceSeen,
-			Direction: DirEither, ThresholdHours: thresholdHours,
-		}}
+// templateID falls back to the kind's default template when it is empty,
+// unknown, or names a template for the wrong kind of target. thresholdHours
+// overrides the template's tuned threshold when positive; zero means "the
+// template knows best", which is what the add form sends.
+func DefaultRules(kind, templateID string, thresholdHours int, alertOnRelay bool) []Rule {
+	t, ok := TemplateByID(templateID)
+	if !ok || (t.Kind != "" && t.Kind != kind) {
+		t, ok = TemplateByID(DefaultTemplateID(kind))
+		if !ok {
+			return nil
+		}
 	}
-	rules := []Rule{
-		{
-			Label:  "Adverts, responses or channel messages",
-			Source: SourceTypes,
-			Types: []int{
-				corescope.TypeADVERT, corescope.TypeRESPONSE, corescope.TypeGRPTXT,
-			},
-			Direction:      DirEither,
-			ThresholdHours: thresholdHours,
-		},
-		// The backstop, and it is not optional. The rule above can only see
+	if thresholdHours > 0 {
+		t.ThresholdHours = thresholdHours
+	}
+	rules := []Rule{t.Rule()}
+	if kind == string(corescope.KindObserver) {
+		// An observer never appears in packet routes — it reports what it
+		// hears rather than forwarding it — so neither the backstop nor the
+		// relay rule below has anything to say about one.
+		return rules
+	}
+	if t.Source == "" || t.Source == SourceTypes {
+		// The backstop, and it is not optional. A per-type rule can only see
 		// adverts and path hops at least three bytes wide, so a node whose
 		// traffic never happens to be attributable produces no evidence — and
 		// a rule with no evidence deliberately stays quiet rather than
@@ -371,12 +368,12 @@ func DefaultRules(kind string, thresholdHours int, alertOnRelay bool) []Rule {
 		// more traffic it always triggers later than the rule above would have
 		// — so in normal operation the precise rule speaks first and this one
 		// never gets a word in. It only matters when the precise rule is blind.
-		{
+		rules = append(rules, Rule{
 			Label:          "Not heard at all",
 			Source:         SourceSeen,
 			Direction:      DirEither,
-			ThresholdHours: thresholdHours,
-		},
+			ThresholdHours: t.ThresholdHours,
+		})
 	}
 	if alertOnRelay {
 		// The old opt-in, still offered when adding a node. Uses CoreScope's
@@ -386,7 +383,7 @@ func DefaultRules(kind string, thresholdHours int, alertOnRelay bool) []Rule {
 			Label:          "Stopped passing traffic",
 			Source:         SourceRelayed,
 			Direction:      DirCarried,
-			ThresholdHours: thresholdHours,
+			ThresholdHours: t.ThresholdHours,
 		})
 	}
 	return rules
@@ -404,6 +401,12 @@ func DefaultRules(kind string, thresholdHours int, alertOnRelay bool) []Rule {
 // seen in over 24 hours.
 func (s *Store) CreateWatch(ctx context.Context, w Watch, maxPerUser int) (int64, error) {
 	now := s.Now().UTC()
+	rules := DefaultRules(w.TargetKind, w.TemplateID, w.ThresholdHours, w.AlertOnRelay)
+	if len(rules) > 0 && w.ThresholdHours == 0 {
+		// The watches row keeps a threshold for display and for older rows;
+		// when the template's tuned value governed, record that.
+		w.ThresholdHours = rules[0].ThresholdHours
+	}
 	var id int64
 	err := s.tx(ctx, func(tx *sql.Tx) error {
 		var n int
@@ -432,7 +435,7 @@ func (s *Store) CreateWatch(ctx context.Context, w Watch, maxPerUser int) (int64
 			return err
 		}
 
-		for _, r := range DefaultRules(w.TargetKind, w.ThresholdHours, w.AlertOnRelay) {
+		for _, r := range rules {
 			r.WatchID = id
 			if _, err := s.insertRuleTx(ctx, tx, r, w.TargetKind, strings.ToLower(w.TargetKey), now); err != nil {
 				return err
