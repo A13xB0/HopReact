@@ -109,7 +109,7 @@ func (r Result) Insights(now time.Time, loc *time.Location, lat, lon float64) []
 		}
 		out = append(out, Insight{fmt.Sprintf("Break-even is about %.2f kWh/m² of sun a day.", r.Fit.BreakEvenKWh), text})
 	case r.HasWeather && r.NoFitReason != "":
-		out = append(out, Insight{"No break-even yet.", "Working out how much sun it needs " + r.NoFitReason + "."})
+		out = append(out, Insight{"No break-even yet.", r.NoForecastReason()})
 	}
 
 	if best, ok := r.sunniest(); ok && !r.PanelFault {
@@ -189,6 +189,37 @@ func Season(now time.Time, loc *time.Location, lat, lon float64) (Seasonal, bool
 	}
 	s.Length = d.Length()
 	return s, true
+}
+
+// NoForecastReason says, in plain words, why there's no battery forecast.
+// Empty when there is one.
+func (r Result) NoForecastReason() string {
+	switch {
+	case len(r.Forecast) > 0:
+		return ""
+	case r.Mains:
+		return "It looks like mains power or a very big battery, so sunshine makes no difference to forecast."
+	case r.LatestAt.IsZero():
+		return "There are no readings to start a forecast from."
+	case !r.HasWeather:
+		return "There's no weather for this repeater to forecast from."
+	case r.NoFitReason == ReasonFewDays:
+		days := "none so far"
+		switch {
+		case r.FitDays == 1:
+			days = "only 1 so far"
+		case r.FitDays > 1:
+			days = fmt.Sprintf("only %d so far", r.FitDays)
+		}
+		return fmt.Sprintf("It needs at least %d full days of readings with weather to learn how this battery responds to sunshine, and has %s.", minFitDays, days)
+	case r.NoFitReason == ReasonSameSun:
+		return "Every day so far has had much the same sunshine, so it can't yet tell how much the sun helps. A mix of bright and dull days will sort that out."
+	case r.NoFitReason == ReasonNoFollow:
+		return "Its charge doesn't follow the sunshine, which usually means a full or very big battery, mains power, or a panel that isn't charging."
+	case r.Fit != nil:
+		return "The newest reading is too old to start a forecast from, or the weather forecast doesn't reach far enough ahead."
+	}
+	return "There isn't enough data yet."
 }
 
 // ForecastText is the coming week in a sentence or two, for the page and

@@ -351,13 +351,60 @@ func TestAnalyseForecastToggle(t *testing.T) {
 	}
 }
 
-func TestAnalyseForecastWithoutFit(t *testing.T) {
+func TestAnalyseShortRangeStillForecasts(t *testing.T) {
 	f := newAnalyse(t, true)
 	_, body := f.get(t, f.path("?days=3&forecast=1"))
-	if strings.Contains(body, `class="ac-proj"`) || !strings.Contains(body, "can&#39;t be projected yet") {
-		t.Fatal("three days is too few for a break-even, so no projection and say why")
+	if !strings.Contains(body, `class="ac-proj"`) || strings.Contains(body, "Not enough data to forecast") {
+		t.Fatal("the 3-day view learns from 14 days, so it can forecast")
 	}
-	if !strings.Contains(body, `class="ac-nowline"`) {
-		t.Fatal("the forecast weather still shows")
+}
+
+func TestAnalyseSaysWhyNoForecast(t *testing.T) {
+	f := newAnalyse(t, true)
+	// A repeater whose readings only began three days ago.
+	f.srv.Store.Now = func() time.Time { return anNow }
+	cut := anNow.Add(-3 * 24 * time.Hour)
+	f.srv.Scope = corescope.NewClient(fakeScopeFrom(t, cut).URL, 5*time.Second, nil)
+	_, body := f.get(t, f.path("?days=7&forecast=1"))
+	if strings.Contains(body, `class="ac-proj"`) {
+		t.Fatal("no projection from 3 days")
 	}
+	for _, want := range []string{"Not enough data to forecast the battery yet.", "Not enough data to forecast yet.",
+		"needs at least 5 full days of readings with weather", "only 2 so far", "Not enough data to forecast</text>"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("page is missing %q", want)
+		}
+	}
+	// Without the forecast ticked, the Next 7 days panel still says why.
+	_, off := f.get(t, f.path("?days=7"))
+	if !strings.Contains(off, "Not enough data to forecast yet.") || strings.Contains(off, "Not enough data to forecast the battery yet.") {
+		t.Fatal("unticked: the panel explains, the chart note doesn't show")
+	}
+}
+
+// fakeScopeFrom serves the simulated repeater with readings only from cut.
+func fakeScopeFrom(t *testing.T, cut time.Time) *httptest.Server {
+	inner := fakeScope(t, nil)
+	t.Cleanup(inner.Close)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resp, err := http.Get(inner.URL + r.URL.String())
+		if err != nil {
+			http.Error(w, err.Error(), 500)
+			return
+		}
+		defer resp.Body.Close()
+		var body map[string]any
+		json.NewDecoder(resp.Body).Decode(&body)
+		var keep []any
+		for _, x := range body["samples"].([]any) {
+			at, _ := time.Parse(time.RFC3339, x.(map[string]any)["timestamp"].(string))
+			if !at.Before(cut) {
+				keep = append(keep, x)
+			}
+		}
+		body["samples"] = keep
+		json.NewEncoder(w).Encode(body)
+	}))
+	t.Cleanup(srv.Close)
+	return srv
 }

@@ -71,6 +71,9 @@ type Input struct {
 	Weather []weather.Hour
 	Levels  alert.BatteryLevels
 	Loc     *time.Location
+	// FitFrom, when before From, lets the break-even learn from more days
+	// than are shown, so a short range can still be forecast.
+	FitFrom time.Time
 }
 
 // Day is one sunrise to the next: a day of charging and the night after it.
@@ -137,8 +140,10 @@ type Result struct {
 	HasWeather bool
 
 	Fit *Fit
-	// NoFitReason says why there is no break-even yet.
+	// NoFitReason says why there is no break-even yet, and FitDays how
+	// many usable days the break-even had to learn from.
 	NoFitReason string
+	FitDays     int
 	// BrokeEven counts complete days at or above break-even.
 	BrokeEven, CompleteDays int
 
@@ -176,7 +181,20 @@ func Analyse(in Input) Result {
 		return r
 	}
 	r.Spans = sun.Spans(in.From, in.Now, in.Lat, in.Lon)
-	r.Days = ledger(samples, in)
+	// The break-even may learn from further back than the range shown.
+	learn := in
+	if !in.FitFrom.IsZero() && in.FitFrom.Before(in.From) {
+		learn.From = in.FitFrom
+	}
+	allDays := ledger(within(in.Samples, learn.From, in.Now), learn)
+	for _, d := range allDays {
+		if !d.Set.Before(in.From) {
+			r.Days = append(r.Days, d)
+		}
+		if d.HasNet && d.HasWeather {
+			r.FitDays++
+		}
+	}
 	if mid, span, ok := morningNet(r.Days); ok {
 		r.NetMV, r.NetSpan, r.HasNet = mid, span, true
 	}
@@ -187,7 +205,7 @@ func Analyse(in Input) Result {
 	if r.Mains {
 		return r
 	}
-	r.Fit, r.NoFitReason = fit(r.Days)
+	r.Fit, r.NoFitReason = fit(allDays)
 	if r.Fit != nil {
 		for _, d := range r.Days {
 			if d.HasNet && d.HasWeather {
@@ -359,6 +377,14 @@ func panelFault(days []Day) (bool, Day) {
 	return false, Day{}
 }
 
+// Why there is no break-even. They read on from "Working out how much sun
+// it needs ...".
+const (
+	ReasonFewDays  = "needs at least 5 full days with weather"
+	ReasonSameSun  = "needs a mix of sunny and dull days"
+	ReasonNoFollow = "can't, because its charge doesn't follow the sunshine"
+)
+
 func fit(days []Day) (*Fit, string) {
 	var pts [][2]float64
 	lo, hi := math.Inf(1), math.Inf(-1)
@@ -369,10 +395,10 @@ func fit(days []Day) (*Fit, string) {
 		}
 	}
 	if len(pts) < minFitDays {
-		return nil, "needs at least 5 full days with weather"
+		return nil, ReasonFewDays
 	}
 	if hi-lo < minFitSpreadKWh {
-		return nil, "needs a mix of sunny and dull days"
+		return nil, ReasonSameSun
 	}
 	var slopes []float64
 	for i := range pts {
@@ -384,7 +410,7 @@ func fit(days []Day) (*Fit, string) {
 	}
 	m := median(slopes)
 	if m <= 0 {
-		return nil, "its charge doesn't follow the sunshine"
+		return nil, ReasonNoFollow
 	}
 	var ics, res []float64
 	for _, p := range pts {

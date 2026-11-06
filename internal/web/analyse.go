@@ -58,7 +58,13 @@ type analysisView struct {
 	CanForecast  bool
 	ShowForecast bool
 	Projected    bool // a voltage projection was drawn
+	// NoForecast says why there's no battery forecast, when there isn't.
+	NoForecast string
 }
+
+// fitWindow is the least history the break-even learns from, whatever range
+// is shown, so the 3-day view can still forecast.
+const fitWindow = 14
 
 // forecastAhead is how far the chart's forecast reaches.
 const forecastAhead = 5 * 24 * time.Hour
@@ -145,6 +151,8 @@ func (s *Server) analysis(ctx context.Context, view store.WatchView, days int, f
 	now := s.Store.Now().UTC()
 	loc := s.Cfg.Battery.Location()
 	from := now.Add(-time.Duration(days) * 24 * time.Hour)
+	fetchDays := max(days, fitWindow)
+	fitFrom := now.Add(-time.Duration(fetchDays) * 24 * time.Hour)
 
 	av := &analysisView{WatchID: view.Watch.ID, Days: days, Name: "This repeater"}
 	if view.Target != nil && view.Target.Name != "" {
@@ -168,7 +176,7 @@ func (s *Server) analysis(ctx context.Context, view store.WatchView, days int, f
 	var temps []corescope.TempSample
 	if s.Scope != nil {
 		cctx, cancel := context.WithTimeout(ctx, 15*time.Second)
-		rep, err := s.Scope.Battery(cctx, key, days)
+		rep, err := s.Scope.Battery(cctx, key, fetchDays)
 		cancel()
 		switch {
 		case err == nil:
@@ -194,7 +202,7 @@ func (s *Server) analysis(ctx context.Context, view store.WatchView, days int, f
 
 	var hours []weather.Hour
 	if av.HasPosition && s.Cfg.Battery.Weather && s.Weather != nil {
-		res, err := s.Weather.Hours(ctx, lat, lon, from.Add(-36*time.Hour), now.Add(10*24*time.Hour))
+		res, err := s.Weather.Hours(ctx, lat, lon, fitFrom.Add(-36*time.Hour), now.Add(10*24*time.Hour))
 		switch {
 		case errors.Is(err, weather.ErrUnavailable):
 			av.Notices = append(av.Notices, "Weather is unavailable right now. Sunrise, sunset and twilight still show. Try again later.")
@@ -210,7 +218,7 @@ func (s *Server) analysis(ctx context.Context, view store.WatchView, days int, f
 	av.Weather = len(hours) > 0
 
 	in := batteryanalysis.Input{Samples: samples, From: from, Now: now, HasPosition: av.HasPosition,
-		Lat: lat, Lon: lon, Weather: hours, Levels: levels, Loc: loc}
+		Lat: lat, Lon: lon, Weather: hours, Levels: levels, Loc: loc, FitFrom: fitFrom}
 	res := batteryanalysis.Analyse(in)
 	av.Verdict = res.Verdict(loc)
 	av.Mains = res.Mains
@@ -230,12 +238,11 @@ func (s *Server) analysis(ctx context.Context, view store.WatchView, days int, f
 		ch.Proj = res.Project(hours, ch.End)
 		av.Projected = len(ch.Proj) > 0
 		if !av.Projected {
-			msg := "There isn't enough history to project the battery yet, so only the forecast weather is shown."
-			if res.NoFitReason != "" {
-				msg = "The battery can't be projected yet: working out how much sun it needs " + res.NoFitReason + ". Only the forecast weather is shown."
-			}
-			av.Notices = append(av.Notices, msg)
+			ch.NoProj = true
 		}
+	}
+	if av.CanForecast && len(res.Forecast) == 0 {
+		av.NoForecast = res.NoForecastReason()
 	}
 	av.Chart = analysisChart(ch, false)
 	av.ChartSm = analysisChart(ch, true)

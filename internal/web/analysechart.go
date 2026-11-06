@@ -34,6 +34,9 @@ type chartInput struct {
 	// the projected voltage drawn there.
 	End  time.Time
 	Proj []batteryanalysis.ProjPoint
+	// NoProj marks the forecast area as having no battery forecast; the
+	// page says why underneath.
+	NoProj bool
 }
 
 // axisEnd is where the time axis stops.
@@ -212,6 +215,11 @@ func analysisChart(c chartInput, compact bool) template.HTML {
 			mid = append(mid, fmt.Sprintf("%.1f,%.1f", x(p.At), y(p.MidMV)))
 		}
 		b.f(`<polyline points="%s" class="ac-proj"/>`, strings.Join(mid, " "))
+	}
+	if t1.After(c.To) && c.NoProj && right-x(c.To) >= 170 {
+		cx, cy := (x(c.To)+right)/2, top+vH/2
+		b.text(cx, cy, "ac-t ac-noproj", "middle", "Not enough data to forecast")
+		b.text(cx, cy+17, "ac-t", "middle", "the battery yet. The reason is below.")
 	}
 	if t1.After(c.To) {
 		xn := x(c.To)
