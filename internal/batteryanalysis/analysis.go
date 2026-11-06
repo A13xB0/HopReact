@@ -20,14 +20,23 @@ import (
 const (
 	// A solar battery bottoms out around sunrise, when the panel has given
 	// nothing for hours. morningBefore/After is the window its low is taken
-	// from, and minMorning how many readings that window needs.
-	morningBefore = 2 * time.Hour
+	// from, minMorning how many readings that window needs, and nearRise how
+	// close to sunrise at least one of them must be. A battery drains all
+	// night, so with readings only every couple of hours the night's lowest
+	// still stands in well for the morning low.
+	morningBefore = 5 * time.Hour
 	morningAfter  = 3 * time.Hour
 	minMorning    = 2
-	// The day's high is the highest reading from sunrise to two hours after
-	// sunset, and needs minDaytime readings.
-	highAfterSet = 2 * time.Hour
-	minDaytime   = 3
+	nearRise      = 3 * time.Hour
+	// The day's high is the highest reading from sunrise to highAfterSet
+	// after sunset, and needs minDaytime readings.
+	highAfterSet = 3 * time.Hour
+	minDaytime   = 2
+	// The panel check wants a well-covered day: at least panelReads readings
+	// including one within midday of solar noon, so a missed peak can't
+	// look like a dead panel.
+	panelReads = 3
+	midday     = 2 * time.Hour
 
 	// minFitDays and minFitSpreadKWh: a break-even line needs enough days,
 	// and days different enough in sunshine to tell the slope from noise.
@@ -270,19 +279,17 @@ func ledger(s []alert.Sample, in Input) []Day {
 		if d.Set.Before(in.From) || d.Rise.After(in.Now) {
 			continue
 		}
-		if mv, n := extreme(s, d.Rise.Add(-morningBefore), d.Rise.Add(morningAfter), false); n >= minMorning &&
-			!in.Now.Before(d.Rise.Add(morningAfter)) {
-			d.MorningLowMV = mv
-		}
+		d.MorningLowMV = morningLow(s, d.Rise, in.Now)
+		wellCovered := false
 		if !in.Now.Before(d.Set.Add(highAfterSet)) {
 			if mv, n := extreme(s, d.Rise, d.Set.Add(highAfterSet), true); n >= minDaytime {
 				d.HighMV = mv
+				noon := d.Rise.Add(d.Set.Sub(d.Rise) / 2)
+				_, mid := extreme(s, noon.Add(-midday), noon.Add(midday), true)
+				wellCovered = n >= panelReads && mid > 0
 			}
 		}
-		if mv, n := extreme(s, d.NextRise.Add(-morningBefore), d.NextRise.Add(morningAfter), false); n >= minMorning &&
-			!in.Now.Before(d.NextRise.Add(morningAfter)) {
-			d.NextLowMV = mv
-		}
+		d.NextLowMV = morningLow(s, d.NextRise, in.Now)
 		if d.MorningLowMV > 0 && d.HighMV > 0 {
 			d.HasGain, d.GainMV = true, d.HighMV-d.MorningLowMV
 		}
@@ -293,11 +300,27 @@ func ledger(s []alert.Sample, in Input) []Day {
 			d.HasNet, d.NetMV = true, d.NextLowMV-d.MorningLowMV
 		}
 		d.HasWeather, d.SunKWh, d.CloudPct = dayWeather(in.Weather, d)
-		d.PanelSuspect = d.HasGain && d.HasWeather && d.SunKWh >= panelSunKWh &&
+		d.PanelSuspect = d.HasGain && wellCovered && d.HasWeather && d.SunKWh >= panelSunKWh &&
 			d.GainMV < panelGainMV && d.MorningLowMV < roomToFillMV
 		out = append(out, d)
 	}
 	return out
+}
+
+// morningLow is the lowest reading through the night up to a few hours
+// after sunrise, or 0 when there aren't enough readings near it.
+func morningLow(s []alert.Sample, rise, now time.Time) int {
+	if now.Before(rise.Add(morningAfter)) {
+		return 0
+	}
+	mv, n := extreme(s, rise.Add(-morningBefore), rise.Add(morningAfter), false)
+	if n < minMorning {
+		return 0
+	}
+	if _, near := extreme(s, rise.Add(-nearRise), rise.Add(morningAfter), false); near == 0 {
+		return 0
+	}
+	return mv
 }
 
 // dayWeather sums the sunshine from one sunrise to the next and averages

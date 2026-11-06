@@ -335,3 +335,38 @@ func TestForecastStartsFromAnHoursOldReading(t *testing.T) {
 		t.Fatalf("a day-old reading is too old: %q", r.NoForecastReason())
 	}
 }
+
+// Readings every two hours with gaps, as Bishop Hill sends them, still fill
+// the table. These are its real readings from 4 to 6 November 2026.
+func TestTwoHourlyReadingsFillTheLedger(t *testing.T) {
+	at := func(d, h, m int) time.Time { return time.Date(2026, 11, d, h, m, 0, 0, time.UTC) }
+	var s []alert.Sample
+	for _, r := range []struct{ d, h, m, mv int }{
+		{3, 6, 40, 3930}, {3, 8, 40, 3940}, {3, 12, 40, 3960}, {3, 14, 40, 3965},
+		{4, 0, 41, 3948}, {4, 2, 41, 3930}, {4, 4, 41, 3940}, {4, 6, 40, 3930}, {4, 8, 40, 3935}, {4, 18, 41, 3970},
+		{5, 0, 40, 3970}, {5, 2, 42, 3970}, {5, 6, 41, 3960}, {5, 10, 41, 3950}, {5, 13, 3, 3960}, {5, 14, 40, 3950},
+		{5, 16, 40, 3960}, {5, 20, 41, 3940}, {5, 22, 41, 3940},
+		{6, 1, 3, 3950}, {6, 2, 40, 3930}, {6, 4, 40, 3920}, {6, 7, 3, 3930}, {6, 10, 41, 3910}, {6, 12, 40, 3900},
+	} {
+		s = append(s, alert.Sample{At: at(r.d, r.h, r.m), MV: r.mv})
+	}
+	const bLat, bLon = 56.215, -3.312
+	r := Analyse(Input{Samples: s, From: at(3, 0, 0), Now: at(6, 21, 30), HasPosition: true, Lat: bLat, Lon: bLon, Levels: levels})
+	got := map[int]Day{}
+	for _, d := range r.Days {
+		got[d.Rise.Day()] = d
+	}
+	wed, thu := got[4], got[5]
+	if !wed.HasGain || !wed.HasOvernight || !wed.HasNet {
+		t.Fatalf("Wed 4: gain %v overnight %v net %v", wed.HasGain, wed.HasOvernight, wed.HasNet)
+	}
+	if !thu.HasGain || !thu.HasOvernight || !thu.HasNet {
+		t.Fatalf("Thu 5: gain %v overnight %v net %v", thu.HasGain, thu.HasOvernight, thu.HasNet)
+	}
+	if wed.MorningLowMV != 3930 || thu.MorningLowMV != 3960 || thu.NextLowMV != 3920 {
+		t.Fatalf("morning lows %d, %d, %d", wed.MorningLowMV, thu.MorningLowMV, thu.NextLowMV)
+	}
+	if wed.PanelSuspect {
+		t.Fatal("one reading at 08:40 and one at 18:41 isn't enough to call the panel dead")
+	}
+}
