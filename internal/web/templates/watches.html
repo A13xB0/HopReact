@@ -83,6 +83,7 @@ quiet before HopReact messages you.</p></div>
     {{with index $.Battery .Watch.ID}}
       <span class="pill {{.Class}}">{{.Chip}}</span>
       {{with .Short}}<br><span class="small">{{.}}</span>{{end}}
+      {{if or .HasReading .Silent}}<br><span class="small"><a href="/watches/{{.WatchID}}/battery/analyse">Analyse battery</a></span>{{end}}
     {{else}}<span class="small">—</span>{{end}}
   </td>
   {{end}}

@@ -299,6 +299,10 @@ func TestWatchPageLinksToAnalysis(t *testing.T) {
 	if !strings.Contains(body, `href="/watches/`+itoa(f.watchID)+`/battery/analyse">Analyse battery`) {
 		t.Fatal("the battery card should link to the analysis")
 	}
+	_, body = f.get(t, "/watches")
+	if !strings.Contains(body, `href="/watches/`+itoa(f.watchID)+`/battery/analyse">Analyse battery`) {
+		t.Fatal("Your nodes should link to the analysis under the battery reading")
+	}
 }
 
 // TestDumpAnalyse writes the page to $HOPREACT_DUMP for a look in a browser.
@@ -308,6 +312,13 @@ func TestDumpAnalyse(t *testing.T) {
 		t.Skip("set HOPREACT_DUMP to write pages")
 	}
 	f := newAnalyse(t, true)
+	if err := f.st.SaveBatteryReadings(context.Background(), store.BatteryReadings{Key: anKey,
+		Status: corescope.BatteryOK, LatestMV: 3940, LatestAt: anNow.Add(-time.Hour), FetchedAt: anNow,
+		Samples: []corescope.BatterySample{{At: anNow.Add(-time.Hour), MV: 3940}}}); err != nil {
+		t.Fatal(err)
+	}
+	_, nodes := f.get(t, "/watches")
+	os.WriteFile(filepath.Join(dir, "watches.html"), []byte(nodes), 0o644)
 	for name, q := range map[string]string{"analyse.html": "", "analyse-30.html": "?days=30"} {
 		_, body := f.get(t, f.path(q))
 		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
