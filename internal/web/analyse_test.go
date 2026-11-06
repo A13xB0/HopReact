@@ -319,7 +319,7 @@ func TestDumpAnalyse(t *testing.T) {
 	}
 	_, nodes := f.get(t, "/watches")
 	os.WriteFile(filepath.Join(dir, "watches.html"), []byte(nodes), 0o644)
-	for name, q := range map[string]string{"analyse.html": "", "analyse-30.html": "?days=30"} {
+	for name, q := range map[string]string{"analyse.html": "", "analyse-30.html": "?days=30", "analyse-fc.html": "?days=7&forecast=1"} {
 		_, body := f.get(t, f.path(q))
 		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
 			t.Fatal(err)
@@ -328,4 +328,36 @@ func TestDumpAnalyse(t *testing.T) {
 	js, _ := staticFS.ReadFile("static/analyse.js")
 	os.MkdirAll(filepath.Join(dir, "static"), 0o755)
 	os.WriteFile(filepath.Join(dir, "static", "analyse.js"), js, 0o644)
+}
+
+func TestAnalyseForecastToggle(t *testing.T) {
+	f := newAnalyse(t, true)
+	_, off := f.get(t, f.path(""))
+	if !strings.Contains(off, `id="show-forecast"`) || strings.Contains(off, `id="show-forecast" checked`) {
+		t.Fatal("the forecast box should be there and unticked by default")
+	}
+	if strings.Contains(off, `class="ac-proj"`) || strings.Contains(off, `class="ac-nowline"`) {
+		t.Fatal("no forecast drawn unless asked for")
+	}
+	code, on := f.get(t, f.path("?days=7&forecast=1"))
+	if code != http.StatusOK {
+		t.Fatal(code)
+	}
+	for _, want := range []string{`id="show-forecast" checked`, `class="ac-proj"`, `class="ac-band"`,
+		`class="ac-nowline"`, "Forecast voltage", `href="?days=14&amp;forecast=1"`} {
+		if !strings.Contains(on, want) {
+			t.Errorf("forecast page is missing %q", want)
+		}
+	}
+}
+
+func TestAnalyseForecastWithoutFit(t *testing.T) {
+	f := newAnalyse(t, true)
+	_, body := f.get(t, f.path("?days=3&forecast=1"))
+	if strings.Contains(body, `class="ac-proj"`) || !strings.Contains(body, "can&#39;t be projected yet") {
+		t.Fatal("three days is too few for a break-even, so no projection and say why")
+	}
+	if !strings.Contains(body, `class="ac-nowline"`) {
+		t.Fatal("the forecast weather still shows")
+	}
 }

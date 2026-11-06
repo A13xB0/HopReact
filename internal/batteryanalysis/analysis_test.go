@@ -247,3 +247,54 @@ func TestSeason(t *testing.T) {
 		t.Fatalf("Newcastle's shortest day is about 7 hours, got %s", s.Length)
 	}
 }
+
+func TestProjectKeepsTheDailyShape(t *testing.T) {
+	s := simulate(3995, time.Time{})
+	r := Analyse(input(s))
+	until := now.Add(5 * 24 * time.Hour)
+	p := r.Project(s.hours, until)
+	if len(p) < 5*24 {
+		t.Fatalf("projection has %d points, want about 5 days of hours", len(p))
+	}
+	if !p[0].At.Equal(r.LatestAt) || int(p[0].MidMV) != r.LatestMV {
+		t.Fatal("projection should start at the latest reading")
+	}
+	rises, falls := 0, 0
+	for i := 1; i < len(p); i++ {
+		if p[i].At.After(until) {
+			t.Fatal("projection runs past its end")
+		}
+		if p[i].LowMV > p[i].MidMV || p[i].HighMV < p[i].MidMV || p[i].HighMV > 4200 {
+			t.Fatalf("point %d out of order", i)
+		}
+		switch {
+		case p[i].MidMV > p[i-1].MidMV:
+			rises++
+		case p[i].MidMV < p[i-1].MidMV:
+			falls++
+		}
+	}
+	if rises < 10 || falls < 50 {
+		t.Fatalf("rises %d, falls %d: should charge by day and drain by night", rises, falls)
+	}
+	// The daily morning projection and the hourly one agree to within the
+	// spread of a day.
+	end := p[len(p)-1]
+	var morning ForecastDay
+	for _, f := range r.Forecast {
+		if f.Morning.Before(until) {
+			morning = f
+		}
+	}
+	if math.Abs(end.MidMV-morning.MidMV) > 60 {
+		t.Fatalf("hourly ends at %.0f, daily says %.0f", end.MidMV, morning.MidMV)
+	}
+}
+
+func TestProjectNeedsAFit(t *testing.T) {
+	in := input(simulate(3995, time.Time{}))
+	in.Weather = nil
+	if p := Analyse(in).Project(simulate(3995, time.Time{}).hours, now.Add(48*time.Hour)); p != nil {
+		t.Fatal("no fit, no projection")
+	}
+}

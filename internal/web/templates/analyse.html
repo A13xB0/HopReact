@@ -40,6 +40,13 @@
 .ac .ac-air{fill:none;stroke:var(--muted);stroke-width:1.4;stroke-dasharray:4 3}
 .ac .ac-dev{fill:none;stroke:var(--orange);stroke-width:1.6}
 .ac .ac-cross{stroke:var(--warn);stroke-width:1}
+.ac .ac-proj{fill:none;stroke:var(--text);stroke-width:2;stroke-dasharray:2 4;stroke-linecap:round}
+.ac .ac-band{fill:#5aa9ff;opacity:.18}
+.ac .ac-nowline{stroke:var(--muted);stroke-width:1}
+.ac .ac-nowlabel{fill:var(--text)}
+.fc-toggle{margin:0;font-size:.85rem;color:var(--muted)}
+.fc-toggle label{display:inline-flex;gap:.4rem;align-items:center;cursor:pointer}
+.legend i.lg-proj{background:rgba(90,169,255,.25);border-color:var(--text);border-style:dashed}
 .ac .fc-up{fill:var(--good);opacity:.85}.ac .fc-down{fill:var(--bad);opacity:.85}
 .legend{display:flex;flex-wrap:wrap;gap:.35rem .9rem;font-size:.75rem;color:var(--muted);margin-top:.5rem}
 .legend i{display:inline-block;width:12px;height:12px;border-radius:3px;vertical-align:-2px;margin-right:.3rem;border:1px solid var(--border)}
@@ -78,7 +85,7 @@
       <div class="small">{{if $a.HasPosition}}Position from its advert: {{$a.Position}} · {{end}}times in UK time</div>
     </div>
     <nav class="ranges" aria-label="Range">
-      {{range $a.Ranges}}<a href="?days={{.Days}}"{{if .On}} aria-current="page"{{end}}>{{.Days}} days</a>{{end}}
+      {{range $a.Ranges}}<a href="{{$a.RangeQuery .Days}}"{{if .On}} aria-current="page"{{end}}>{{.Days}} days</a>{{end}}
     </nav>
   </div>
   {{range $a.Notices}}<p class="notice">{{.}}</p>{{end}}
@@ -96,7 +103,13 @@
 <div class="card">
   <div class="row spread">
     <h3 style="margin:0">Voltage{{if $a.HasPosition}}, daylight{{end}}{{if $a.Weather}} and weather{{end}}</h3>
-    {{if $a.HasPosition}}<span class="small">Shading shows night, the three twilights and day</span>{{end}}
+    {{if $a.CanForecast}}
+    <form method="get" class="fc-toggle" id="forecast-form">
+      <input type="hidden" name="days" value="{{$a.Days}}">
+      <label><input type="checkbox" name="forecast" value="1" id="show-forecast"{{if $a.ShowForecast}} checked{{end}}> Show the next 5 days</label>
+      <noscript><button class="secondary" type="submit">Update</button></noscript>
+    </form>
+    {{else if $a.HasPosition}}<span class="small">Shading shows night, the three twilights and day</span>{{end}}
   </div>
   <div class="chart-wrap" id="analyse-chart" data-hover="{{$a.HoverRaw}}">
     <div class="ac-lg">{{$a.Chart}}</div>
@@ -117,6 +130,7 @@
     <span><i style="background:var(--muted);border-color:var(--muted)"></i>Outside air</span>
     {{end}}
     {{if $a.HasTemps}}<span><i style="background:var(--orange);border-color:var(--orange)"></i>Repeater temperature</span>{{end}}
+    {{if $a.Projected}}<span><i class="lg-proj"></i>Forecast voltage and its likely range</span>{{end}}
   </div>
 </div>
 

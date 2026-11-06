@@ -2,6 +2,10 @@
 // day, the nearest reading and the weather that hour.
 (function () {
   "use strict";
+  // The forecast box reloads the page with or without the forecast.
+  var box = document.getElementById("show-forecast");
+  if (box && box.form) box.addEventListener("change", function () { box.form.submit(); });
+
   var wrap = document.getElementById("analyse-chart");
   var tip = document.getElementById("analyse-tip");
   if (!wrap || !tip) return;
@@ -46,8 +50,13 @@
     (d.Spans || []).forEach(function (s) { if (t >= s.S && t < s.E) phase = s.Phase; });
     tip.textContent = "";
     text(tip, stamp(t) + (phase ? " · " + phase : ""), true);
-    var rd = nearest(d.Readings, t, 3 * 3600);
-    text(tip, rd ? (rd[1] / 1000).toFixed(3) + " V, read " + stamp(rd[0]).slice(-5) : "No reading near this time");
+    if (t > d.Now) {
+      var p = nearest(d.Proj, t, 3600);
+      text(tip, p ? "Forecast about " + (p[1] / 1000).toFixed(2) + " V (" + (p[2] / 1000).toFixed(2) + " to " + (p[3] / 1000).toFixed(2) + " V)" : "Forecast");
+    } else {
+      var rd = nearest(d.Readings, t, 3 * 3600);
+      text(tip, rd ? (rd[1] / 1000).toFixed(3) + " V, read " + stamp(rd[0]).slice(-5) : "No reading near this time");
+    }
     // Weather hours are stamped at their end.
     var h = nearest((d.Hours || []).map(function (x) { return [x[0] - 1800, x[1], x[2], x[3]]; }), t, 3600);
     if (h) text(tip, "Sun " + h[1] + " W/m² · cloud " + h[2] + "% · air " + h[3] + " °C");

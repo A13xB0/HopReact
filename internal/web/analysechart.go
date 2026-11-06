@@ -30,6 +30,18 @@ type chartInput struct {
 	From, To time.Time
 	Levels   alert.BatteryLevels
 	Loc      *time.Location
+	// End, when after To, extends the chart into the forecast, and Proj is
+	// the projected voltage drawn there.
+	End  time.Time
+	Proj []batteryanalysis.ProjPoint
+}
+
+// axisEnd is where the time axis stops.
+func (c chartInput) axisEnd() time.Time {
+	if c.End.After(c.To) {
+		return c.End
+	}
+	return c.To
 }
 
 // svgBuf builds SVG from numbers and fixed strings only. Nothing a person
@@ -76,7 +88,7 @@ func analysisChart(c chartInput, compact bool) template.HTML {
 	}
 	bottom := H - labels
 
-	t0, t1 := c.From, c.To
+	t0, t1 := c.From, c.axisEnd()
 	x := func(t time.Time) float64 {
 		return left + float64(t.Sub(t0))/float64(t1.Sub(t0))*(right-left)
 	}
@@ -86,6 +98,9 @@ func analysisChart(c chartInput, compact bool) template.HTML {
 	lo, hi := math.Inf(1), math.Inf(-1)
 	for _, s := range c.Samples {
 		lo, hi = math.Min(lo, float64(s.MV)), math.Max(hi, float64(s.MV))
+	}
+	for _, p := range c.Proj {
+		lo, hi = math.Min(lo, p.LowMV), math.Max(hi, p.HighMV)
 	}
 	if math.IsInf(lo, 1) {
 		lo, hi = 3600, 4200
@@ -181,6 +196,27 @@ func analysisChart(c chartInput, compact bool) template.HTML {
 		for _, s := range c.Samples {
 			b.f(`<circle cx="%.1f" cy="%.1f" r="1.8" class="ac-dot"/>`, x(s.At), y(float64(s.MV)))
 		}
+	}
+	// The forecast: a faint band for the likely range and a dotted line.
+	if len(c.Proj) > 1 {
+		var band []string
+		for _, p := range c.Proj {
+			band = append(band, fmt.Sprintf("%.1f,%.1f", x(p.At), y(p.HighMV)))
+		}
+		for i := len(c.Proj) - 1; i >= 0; i-- {
+			band = append(band, fmt.Sprintf("%.1f,%.1f", x(c.Proj[i].At), y(c.Proj[i].LowMV)))
+		}
+		b.f(`<polygon points="%s" class="ac-band"/>`, strings.Join(band, " "))
+		var mid []string
+		for _, p := range c.Proj {
+			mid = append(mid, fmt.Sprintf("%.1f,%.1f", x(p.At), y(p.MidMV)))
+		}
+		b.f(`<polyline points="%s" class="ac-proj"/>`, strings.Join(mid, " "))
+	}
+	if t1.After(c.To) {
+		xn := x(c.To)
+		b.f(`<line x1="%.1f" x2="%.1f" y1="%.0f" y2="%.1f" class="ac-nowline"/>`, xn, xn, top, bottom)
+		b.text(xn+4, top+12, "ac-t ac-nowlabel", "start", "now")
 	}
 	if n := len(c.Samples); n > 0 {
 		s := c.Samples[n-1]

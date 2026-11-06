@@ -17,6 +17,7 @@ import (
 	"hopreact/internal/corescope"
 	"hopreact/internal/poller"
 	"hopreact/internal/store"
+	"hopreact/internal/sun"
 	"hopreact/internal/weather"
 )
 
@@ -52,6 +53,23 @@ type analysisView struct {
 	ForecastTxt string
 	Weather     bool // weather lines drawn
 	Mains       bool
+	// CanForecast is set when there's forecast weather to draw, and
+	// ShowForecast when the person ticked the box.
+	CanForecast  bool
+	ShowForecast bool
+	Projected    bool // a voltage projection was drawn
+}
+
+// forecastAhead is how far the chart's forecast reaches.
+const forecastAhead = 5 * 24 * time.Hour
+
+// RangeQuery is the query for a range chip, keeping the forecast choice.
+func (a *analysisView) RangeQuery(days int) string {
+	q := fmt.Sprintf("?days=%d", days)
+	if a.ShowForecast {
+		q += "&forecast=1"
+	}
+	return q
 }
 
 type analyseRange struct {
@@ -101,7 +119,7 @@ func (s *Server) handleAnalyse(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	av, err := s.analysis(r.Context(), view, days)
+	av, err := s.analysis(r.Context(), view, days, r.URL.Query().Get("forecast") == "1")
 	if err != nil {
 		s.Log.Error("analysing battery", "watch", id, "err", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
@@ -113,7 +131,7 @@ func (s *Server) handleAnalyse(w http.ResponseWriter, r *http.Request) {
 	s.render(w, "analyse.html", d)
 }
 
-func (s *Server) analysis(ctx context.Context, view store.WatchView, days int) (*analysisView, error) {
+func (s *Server) analysis(ctx context.Context, view store.WatchView, days int, forecast bool) (*analysisView, error) {
 	key := view.Watch.TargetKey
 	now := s.Store.Now().UTC()
 	loc := s.Cfg.Battery.Location()
@@ -195,6 +213,21 @@ func (s *Server) analysis(ctx context.Context, view store.WatchView, days int) (
 
 	ch := chartInput{Samples: within(samples, from, now), Temps: temps, Hours: hours, Spans: res.Spans,
 		From: from, To: now, Levels: levels, Loc: loc}
+	av.CanForecast = av.Weather && !res.Mains
+	if av.CanForecast && forecast {
+		av.ShowForecast = true
+		ch.End = now.Add(forecastAhead)
+		ch.Spans = sun.Spans(from, ch.End, lat, lon)
+		ch.Proj = res.Project(hours, ch.End)
+		av.Projected = len(ch.Proj) > 0
+		if !av.Projected {
+			msg := "There isn't enough history to project the battery yet, so only the forecast weather is shown."
+			if res.NoFitReason != "" {
+				msg = "The battery can't be projected yet: working out how much sun it needs " + res.NoFitReason + ". Only the forecast weather is shown."
+			}
+			av.Notices = append(av.Notices, msg)
+		}
+	}
 	av.Chart = analysisChart(ch, false)
 	av.ChartSm = analysisChart(ch, true)
 	av.HoverRaw = hoverJSON(ch)
@@ -321,12 +354,17 @@ func hoverJSON(c chartInput) string {
 		Temps     [][2]float64
 		Spans     []span
 		TZOffsets [][2]int64
-	}{T0: c.From.Unix(), T1: c.To.Unix(), L: chartLeft, R: chartRight, W: chartWide}
+		Now       int64
+		Proj      [][4]int64
+	}{T0: c.From.Unix(), T1: c.axisEnd().Unix(), L: chartLeft, R: chartRight, W: chartWide, Now: c.To.Unix()}
+	for _, p := range c.Proj {
+		h.Proj = append(h.Proj, [4]int64{p.At.Unix(), int64(math.Round(p.MidMV)), int64(math.Round(p.LowMV)), int64(math.Round(p.HighMV))})
+	}
 	for _, x := range c.Samples {
 		h.Readings = append(h.Readings, [2]int64{x.At.Unix(), int64(x.MV)})
 	}
 	for _, x := range c.Hours {
-		if !x.At.Before(c.From) && !x.At.After(c.To.Add(time.Hour)) {
+		if !x.At.Before(c.From) && !x.At.After(c.axisEnd().Add(time.Hour)) {
 			h.Hours = append(h.Hours, [4]float64{float64(x.At.Unix()), math.Round(x.SunWm2), math.Round(x.CloudPct), math.Round(x.TempC*10) / 10})
 		}
 	}
@@ -342,7 +380,7 @@ func hoverJSON(c chartInput) string {
 	// told the site's offset at each change instead.
 	_, off := c.From.In(c.Loc).Zone()
 	h.TZOffsets = append(h.TZOffsets, [2]int64{c.From.Unix(), int64(off)})
-	for t := c.From; t.Before(c.To); t = t.Add(time.Hour) {
+	for t := c.From; t.Before(c.axisEnd()); t = t.Add(time.Hour) {
 		if _, o := t.In(c.Loc).Zone(); o != off {
 			off = o
 			h.TZOffsets = append(h.TZOffsets, [2]int64{t.Unix(), int64(o)})

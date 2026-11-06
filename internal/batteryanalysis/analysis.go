@@ -469,3 +469,44 @@ func forecast(r *Result, s []alert.Sample, in Input) {
 		}
 	}
 }
+
+// ProjPoint is one hour of the projected voltage.
+type ProjPoint struct {
+	At                   time.Time
+	MidMV, LowMV, HighMV float64
+}
+
+// Project carries the latest reading forward hour by hour until until,
+// using the break-even line: each hour costs a 24th of the line's daily
+// loss and gains its slope times that hour's sunshine. That keeps the
+// day/night shape a solar battery really has. Nil without a fit, or when
+// the latest reading is too old to start from.
+func (r Result) Project(hours []weather.Hour, until time.Time) []ProjPoint {
+	if r.Fit == nil || r.Mains || r.LatestAt.IsZero() {
+		return nil
+	}
+	start, v := r.LatestAt, float64(r.LatestMV)
+	out := []ProjPoint{{At: start, MidMV: v, LowMV: v, HighMV: v}}
+	last := start
+	for _, h := range hours {
+		if !h.At.After(start) || h.At.After(until) {
+			continue
+		}
+		// A gap in the weather would make the projection meaningless past it.
+		if h.At.Sub(last) > 2*time.Hour {
+			break
+		}
+		frac := h.At.Sub(last).Hours()
+		last = h.At
+		v += r.Fit.InterceptMV/24*frac + r.Fit.SlopeMVPerKWh*h.SunWm2/1000*frac
+		v = math.Min(float64(alert.FullMV), v)
+		spread := r.Fit.SpreadMV * math.Sqrt(h.At.Sub(start).Hours()/24)
+		out = append(out, ProjPoint{At: h.At, MidMV: v,
+			LowMV:  v - spread,
+			HighMV: math.Min(float64(alert.FullMV), v+spread)})
+	}
+	if len(out) < 2 {
+		return nil
+	}
+	return out
+}
