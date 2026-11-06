@@ -27,14 +27,16 @@ type recorder struct {
 	// observable.
 	failFirst bool
 	calls     int
+	msgs      []discord.Message
 }
 
-func (r *recorder) SendDM(ctx context.Context, userID, content string) error {
+func (r *recorder) Send(ctx context.Context, userID string, m discord.Message) error {
 	r.calls++
 	if r.err != nil && (!r.failFirst || r.calls == 1) {
 		return r.err
 	}
-	r.sent = append(r.sent, struct{ user, content string }{userID, content})
+	r.sent = append(r.sent, struct{ user, content string }{userID, m.Content})
+	r.msgs = append(r.msgs, m)
 	return nil
 }
 

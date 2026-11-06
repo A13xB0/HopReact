@@ -3,6 +3,7 @@ package corescope
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -307,5 +308,41 @@ func TestNewClientTrimsTrailingSlash(t *testing.T) {
 	}
 	if c.HTTP.Timeout != time.Second {
 		t.Errorf("a nil http client must get the timeout, got %v", c.HTTP.Timeout)
+	}
+}
+
+func TestBatteryReport(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/nodes/missing/battery" {
+			http.Error(w, `{"error":"node not found"}`, http.StatusNotFound)
+			return
+		}
+		if r.URL.Path != "/api/nodes/abc/battery" || r.URL.Query().Get("days") != "7" {
+			t.Errorf("asked for %s", r.URL)
+		}
+		fmt.Fprint(w, `{"status":"low","latest_mv":3620,"latest_ts":"2026-11-06T01:23:31Z","stale":false,
+			"selected":{"observer_name":"Cadham Village","source":"neighbor"},
+			"thresholds":{"low_mv":3300,"critical_mv":3000},
+			"samples":[{"timestamp":"2026-11-06T01:23:31Z","battery_mv":3620},
+			           {"timestamp":"2026-11-05T23:23:31Z","battery_mv":3640},
+			           {"timestamp":"2026-11-05T23:23:31Z","battery_mv":3640},
+			           {"timestamp":"2026-11-05T22:00:00Z","battery_mv":0},
+			           {"timestamp":null,"battery_mv":3600}]}`)
+	}))
+	defer srv.Close()
+	c := NewClient(srv.URL, 5*time.Second, srv.Client())
+	rep, err := c.Battery(context.Background(), "abc", 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.Status != BatteryLow || !rep.Status.HasBattery() || rep.LatestMV != 3620 || rep.Reporter != "Cadham Village" || rep.LowMV != 3300 {
+		t.Errorf("report %+v", rep)
+	}
+	// Duplicates, 0 mV and undated readings dropped; oldest first.
+	if len(rep.Samples) != 2 || rep.Samples[0].MV != 3640 || rep.Samples[1].MV != 3620 {
+		t.Errorf("samples %+v", rep.Samples)
+	}
+	if _, err := c.Battery(context.Background(), "missing", 7); !errors.Is(err, ErrNoBattery) {
+		t.Errorf("404 gave %v, want ErrNoBattery", err)
 	}
 }

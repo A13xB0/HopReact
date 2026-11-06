@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -237,5 +238,54 @@ func TestDisplayNameFallsBackToUsername(t *testing.T) {
 	}
 	if got := (User{Username: "alice", GlobalName: "Alice A"}).DisplayName(); got != "Alice A" {
 		t.Errorf("DisplayName = %q, want the global name", got)
+	}
+}
+
+// A message with a chart goes as multipart: payload_json naming the
+// attachment, then the file itself, which is the only way Discord accepts an
+// image in a DM.
+func TestSendWithFileIsMultipart(t *testing.T) {
+	var payload map[string]any
+	var file []byte
+	var fileName string
+	c := withAPI(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v10/users/@me/channels":
+			json.NewEncoder(w).Encode(map[string]string{"id": "dm-1"})
+		case "/api/v10/channels/dm-1/messages":
+			if err := r.ParseMultipartForm(1 << 20); err != nil {
+				t.Fatalf("not multipart: %v", err)
+			}
+			if err := json.Unmarshal([]byte(r.FormValue("payload_json")), &payload); err != nil {
+				t.Fatalf("payload_json: %v", err)
+			}
+			f, h, err := r.FormFile("files[0]")
+			if err != nil {
+				t.Fatalf("files[0]: %v", err)
+			}
+			defer f.Close()
+			fileName = h.Filename
+			file, _ = io.ReadAll(f)
+			w.Write([]byte(`{"id":"m1"}`))
+		}
+	}))
+	err := c.Send(context.Background(), "u1", Message{
+		Content: "🪫 low",
+		Embeds:  []Embed{{Title: "Bowden_R63 (repeater)", Image: &EmbedImage{URL: "attachment://battery-1.png"}}},
+		Files:   []File{{Name: "battery-1.png", ContentType: "image/png", Data: []byte("png-bytes")}},
+	})
+	if err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if payload["content"] != "🪫 low" || fileName != "battery-1.png" || string(file) != "png-bytes" {
+		t.Fatalf("payload %v, file %q %q", payload, fileName, file)
+	}
+	atts, _ := payload["attachments"].([]any)
+	if len(atts) != 1 {
+		t.Fatalf("attachments %v", payload["attachments"])
+	}
+	am, _ := payload["allowed_mentions"].(map[string]any)
+	if parse, _ := am["parse"].([]any); am == nil || len(parse) != 0 {
+		t.Errorf("allowed_mentions %v: names people chose must never ping anyone", payload["allowed_mentions"])
 	}
 }

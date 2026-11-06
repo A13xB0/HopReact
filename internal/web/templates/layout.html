@@ -93,6 +93,15 @@ label{cursor:pointer}
 .relay-opt b{color:var(--text);font-weight:600}
 
 /* ---------- rules ---------- */
+/* ---------- battery ---------- */
+.battery-now{display:grid;grid-template-columns:auto minmax(0,1fr);gap:.6rem 1.2rem;align-items:center}
+.battery-now .spark{width:100%;max-width:320px;height:auto;justify-self:end}
+.bigv{font:700 2.1rem/1 ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:-.02em}
+.good-text{color:var(--good)}.warn-text{color:var(--warn)}.bad-text{color:var(--bad)}.muted-text{color:var(--muted)}
+.battery-levels{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:.5rem .8rem;align-items:center;margin-top:.6rem}
+.battery-levels input[inputmode]{width:4.6rem}
+@media (max-width:560px){.battery-now{grid-template-columns:1fr}.battery-now .spark{justify-self:start}
+  .battery-levels{grid-template-columns:1fr}}
 .rule{background:#0b1c30;border:1px solid var(--border);border-radius:10px;
   padding:.7rem .85rem;display:grid;gap:.6rem;
   grid-template-columns:minmax(0,1fr) auto;align-items:start}

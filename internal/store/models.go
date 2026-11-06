@@ -15,6 +15,12 @@ type User struct {
 	DMOK           bool
 	DMFailedReason string
 	DMCheckedAt    time.Time
+	// AutoBattery is whether battery rules are added to this person's
+	// repeaters by themselves. On by default.
+	AutoBattery bool
+	// BatteryBanner is how many repeaters the last "battery alerts are on"
+	// message covered, shown once on the watches page. 0 once dismissed.
+	BatteryBanner int
 }
 
 // Target is the last thing CoreScope told us about one watchable node or
@@ -59,12 +65,21 @@ type Watch struct {
 	// overrides the template's tuned one.
 	TemplateID   string
 	AlertOnRelay bool
-	Label          string
-	MutedUntil     time.Time
+	Label        string
+	MutedUntil   time.Time
 	// NotifyRecovery controls the "back online" message. On by default: you
 	// are told when something you were warned about is fixed.
 	NotifyRecovery bool
 	CreatedAt      time.Time
+	// BatteryAddedAt is when this watch was given a battery rule or chose not
+	// to have one. Zero means it may still be given one automatically.
+	BatteryAddedAt time.Time
+	// NoBattery and WithBattery are only read at creation: the owner unticked
+	// or ticked "also tell me when its battery gets low" when adding it.
+	// Unticked marks the battery choice as made, so no rule is ever added by
+	// itself; ticked adds the rule straight away.
+	NoBattery   bool
+	WithBattery bool
 }
 
 // Source is where a rule's timestamp comes from.

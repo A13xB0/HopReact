@@ -104,6 +104,29 @@ alerts:
   # How many watches one account may hold.
   max_watches_per_user: 50
 
+# Low battery alerts. Off by default. When on, HopReact reads each watched
+# repeater's battery from CoreScope (/api/nodes/{key}/battery), adds a "Low
+# battery" rule to watches whose repeater reports a battery (once, and never
+# again if its owner removes it), and tells each person once that it did.
+battery:
+  enabled: false
+  # How often to fetch readings. They arrive about every 1-2 hours.
+  check_every: 30m
+  # New readings in a row that must agree before a level changes.
+  confirm_readings: 2
+  # How far above a level the battery must climb to clear it.
+  recover_margin_mv: 100
+  # The site's levels in millivolts. 0 follows CoreScope's thresholds.
+  # People can set their own on each watch.
+  low_mv: 0
+  critical_mv: 0
+  # Default level for the overcharge alert, which is off on every watch until
+  # its owner turns it on. A full lithium-ion cell is 4200 mV.
+  overcharge_mv: 4250
+  # Where one day ends when finding each night's lowest reading for the
+  # trend, and the days named in messages.
+  timezone: Europe/London
+
 # A public status board at /status. Off by default — publishing your mesh
 # should be a decision, not a surprise.
 status:

@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -33,7 +34,13 @@ type fakeScope struct {
 	// a windowed backfill from an ordinary newest-page read.
 	lastSince     string
 	sinceRequests int
-	srv           *httptest.Server
+	// battery is each node's /api/nodes/{key}/battery reply; a key missing
+	// here answers 404, as CoreScope does for a node nobody has reported.
+	battery     map[string]map[string]any
+	batteryHits int
+	// mu guards battery and batteryHits: batteries are fetched concurrently.
+	mu  sync.Mutex
+	srv *httptest.Server
 }
 
 func newFakeScope(t *testing.T) *fakeScope {
@@ -60,6 +67,18 @@ func newFakeScope(t *testing.T) *fakeScope {
 			return
 		}
 		json.NewEncoder(w).Encode(map[string]any{"nodes": f.nodes, "total": len(f.nodes)})
+	})
+	mux.HandleFunc("/api/nodes/", func(w http.ResponseWriter, r *http.Request) {
+		k := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/api/nodes/"), "/battery")
+		f.mu.Lock()
+		f.batteryHits++
+		b, ok := f.battery[k]
+		f.mu.Unlock()
+		if !ok {
+			http.Error(w, `{"error":"node not found"}`, http.StatusNotFound)
+			return
+		}
+		json.NewEncoder(w).Encode(b)
 	})
 	mux.HandleFunc("/api/observers", func(w http.ResponseWriter, r *http.Request) {
 		if f.status != http.StatusOK {

@@ -47,6 +47,12 @@ type Poller struct {
 	// OnBreaker is called when the blast-radius breaker trips, so the
 	// operator can be told through whatever channel is configured. Optional.
 	OnBreaker func(ctx context.Context, reason string)
+
+	// batteryAt is when battery readings were last fetched. In memory only:
+	// after a restart the first healthy poll fetches them again, which costs
+	// one request per repeater and repeats no alert, since only a newer
+	// reading can move a battery rule.
+	batteryAt time.Time
 }
 
 // RuleTrip is one rule's contribution to a message.
@@ -186,6 +192,14 @@ func (p *Poller) PollOnce(ctx context.Context) error {
 	run.Evaluated = evaluated.committed
 	if evaluated.breakerReason != "" {
 		run.SuppressedReason = evaluated.breakerReason
+	}
+	// Battery checks ride on a believed poll, like everything else that
+	// judges. Best-effort: a failure here must not hold up the quiet-node
+	// alerts that have already been decided.
+	if evaluated.committed && p.batteryDue(now) {
+		if err := p.checkBatteries(ctx, now, snap); err != nil {
+			p.Log.Warn("battery check failed", "run", runID, "err", err)
+		}
 	}
 	p.Log.Info("poll complete", "run", runID, "nodes", run.NodeCount,
 		"observers", run.ObserverCount, "advanced", advanced,

@@ -31,6 +31,7 @@ import (
 	"hopreact/internal/discord"
 	"hopreact/internal/geo"
 	"hopreact/internal/health"
+	"hopreact/internal/poller"
 	"hopreact/internal/store"
 )
 
@@ -97,6 +98,8 @@ func New(st *store.Store, dc *discord.Client, cfg config.Config, log *slog.Logge
 		"add":        func(a, b int) int { return a + b },
 		"stdTypes":   statusTypeNames,
 		"tmplFor":    templatesFor,
+		"volts":      volts,
+		"voltsField": voltsField,
 	}
 	pages := map[string]*template.Template{}
 	for _, page := range []string{"index.html", "watches.html", "search.html", "watch.html", "status.html"} {
@@ -147,6 +150,9 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /search", s.handleSearch)
 	mux.HandleFunc("POST /account/test-dm", s.handleTestDM)
 	mux.HandleFunc("POST /account/delete", s.handleDeleteAccount)
+	mux.HandleFunc("POST /watches/{id}/battery", s.handleBattery)
+	mux.HandleFunc("POST /account/battery", s.handleAutoBattery)
+	mux.HandleFunc("POST /account/battery-banner", s.handleBatteryBanner)
 
 	// The CSRF guard is applied globally and gated on method rather than
 	// per-route, so a route added later cannot silently forget it.
@@ -284,6 +290,13 @@ type pageData struct {
 	FeedHealth feedHealth
 	Status     *statusPage
 	Now        time.Time
+
+	// BatteryOn is whether low battery alerts are enabled on this site.
+	BatteryOn bool
+	// Battery is each listed watch's battery, keyed by watch id; BatteryCard
+	// is the one on a watch page.
+	Battery     map[int64]*batteryCard
+	BatteryCard *batteryCard
 }
 
 // typeGroup is a one-click preset in the rule editor. Groups are expanded to
@@ -497,7 +510,8 @@ type feedHealth struct {
 }
 
 func (s *Server) page(r *http.Request, title string) pageData {
-	d := pageData{Title: title, Cfg: s.Cfg, Version: buildinfo.Version, Now: s.Store.Now().UTC()}
+	d := pageData{Title: title, Cfg: s.Cfg, Version: buildinfo.Version, Now: s.Store.Now().UTC(),
+		BatteryOn: s.Cfg.Battery.Enabled}
 	if u, ok := userFrom(r.Context()); ok {
 		d.User = &u
 		d.CSRF = csrfFrom(r.Context())
@@ -653,6 +667,15 @@ func (s *Server) handleWatches(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	d.Watches = views
+	ws := make([]store.Watch, 0, len(views))
+	for _, v := range views {
+		ws = append(ws, v.Watch)
+	}
+	if d.Battery, err = s.batteryCards(r.Context(), u.ID, ws); err != nil {
+		s.Log.Error("loading battery readings", "err", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
 	d.FeedHealth = s.feedHealth(r)
 	d.Flash, d.FlashKind = flashFrom(r)
 	s.render(w, "watches.html", d)
@@ -707,6 +730,12 @@ func (s *Server) handleAddWatch(w http.ResponseWriter, r *http.Request) {
 		TemplateID:     r.PostFormValue("template"),
 		ThresholdHours: hours,
 		AlertOnRelay:   r.PostFormValue("alert_on_relay") == "on",
+		// The form only carries battery_offered when it showed the box, so an
+		// older form or an observer never opts out by accident.
+		NoBattery: s.Cfg.Battery.Enabled && kind == "node" &&
+			r.PostFormValue("battery_offered") == "1" && r.PostFormValue("battery") != "on",
+		WithBattery: s.Cfg.Battery.Enabled && kind == "node" &&
+			r.PostFormValue("battery_offered") == "1" && r.PostFormValue("battery") == "on",
 		// On by default: being told a node is back is the other half of being
 		// told it went away. It can be turned off per node afterwards.
 		NotifyRecovery: true,
@@ -815,6 +844,13 @@ func (s *Server) handleWatchDetail(w http.ResponseWriter, r *http.Request) {
 
 	d := s.page(r, "Watch settings")
 	d.Watch = &view
+	cards, err := s.batteryCards(r.Context(), u.ID, []store.Watch{view.Watch})
+	if err != nil {
+		s.Log.Error("loading battery readings", "err", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	d.BatteryCard = cards[view.Watch.ID]
 	d.Activity = activityRows(acts)
 	d.Groups = typeGroups
 	d.Templates = templatesFor(view.Watch.TargetKind)
@@ -1036,8 +1072,14 @@ func (s *Server) handleTestDM(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/", http.StatusSeeOther)
 		return
 	}
-	err := s.Discord.SendDM(r.Context(), u.DiscordID,
-		"👋 This is a test from HopReact. Alerts about your nodes will arrive here.")
+	text := "👋 This is a test from HopReact. Alerts about your nodes will arrive here."
+	if s.Cfg.Battery.Enabled {
+		lv := poller.BatteryLevelsFor(store.BatteryRule{}, s.Cfg.Battery, store.BatteryReadings{})
+		text += fmt.Sprintf("\n\nA battery alert looks like this:\n🪫 **A repeater's battery is getting low**\n"+
+			"• **Example repeater** (repeater): %s, low is below %s. Critical (%s) in about 2–3 days.",
+			volts(lv.LowMV-30), volts(lv.LowMV), volts(lv.CriticalMV))
+	}
+	err := s.Discord.SendDM(r.Context(), u.DiscordID, text)
 	if err != nil {
 		reason := "Discord would not deliver the message."
 		if errors.Is(err, discord.ErrUndeliverable) {

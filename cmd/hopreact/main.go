@@ -19,6 +19,7 @@ import (
 	"os/signal"
 	"syscall"
 	"time"
+	_ "time/tzdata" // battery trends need a timezone whether or not the image ships zoneinfo
 
 	"hopreact/internal/buildinfo"
 	"hopreact/internal/config"
@@ -141,7 +142,8 @@ func main() {
 			}
 		},
 	}
-	nt := &notify.Notifier{Store: st, Sender: dc, Log: log, BaseURL: cfg.Site.BaseURL, Now: time.Now}
+	nt := &notify.Notifier{Store: st, Sender: dc, Log: log, BaseURL: cfg.Site.BaseURL, Now: time.Now,
+		ScopeURL: cfg.CoreScope.APIURL, Loc: cfg.Battery.Location()}
 
 	pollTicker := time.NewTicker(cfg.Poll.Interval)
 	defer pollTicker.Stop()

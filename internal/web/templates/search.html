@@ -64,6 +64,14 @@
              hears rather than forwarding, and a companion never relays at
              all — offering this there would be a control that can never do
              anything. */}}
+        {{if and $.BatteryOn (eq .Kind "node")}}
+        <input type="hidden" name="battery_offered" value="1">
+        <label class="relay-opt" style="margin-top:.5rem">
+          <input type="checkbox" name="battery" {{if $.User.AutoBattery}}checked{{end}}>
+          <span><b>Also tell me when its battery gets low.</b>
+          Starts by itself if this repeater reports a battery, now or later.</span>
+        </label>
+        {{end}}
         {{if canRelay .Kind .Role}}
         <label class="relay-opt" style="margin-top:.5rem">
           <input type="checkbox" name="alert_on_relay">

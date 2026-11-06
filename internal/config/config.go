@@ -53,6 +53,7 @@ type Config struct {
 	Poll      PollConfig      `yaml:"poll"`
 	Alerts    AlertsConfig    `yaml:"alerts"`
 	Status    StatusConfig    `yaml:"status"`
+	Battery   BatteryConfig   `yaml:"battery"`
 }
 
 // StatusConfig drives the public status board. It needs no sign-in, so
@@ -243,6 +244,51 @@ type AlertsConfig struct {
 	MaxWatchesPerUser int `yaml:"max_watches_per_user"`
 }
 
+// BatteryConfig controls low battery alerts. Off by default: it reads
+// battery readings CoreScope only has when observers poll repeaters for them,
+// and it adds a rule to people's watches, which an operator should choose.
+type BatteryConfig struct {
+	Enabled bool `yaml:"enabled"`
+	// CheckEvery is how often battery readings are fetched. Readings arrive
+	// about every one to two hours, so polling faster only repeats them.
+	CheckEvery time.Duration `yaml:"check_every"`
+	// ConfirmReadings is how many NEW readings in a row must agree before a
+	// level changes, so one odd reading never sends a message.
+	ConfirmReadings int `yaml:"confirm_readings"`
+	// RecoverMarginMV is how far back above a level a battery must climb to
+	// clear it, so a cell sitting on the line doesn't flap.
+	RecoverMarginMV int `yaml:"recover_margin_mv"`
+	// LowMV and CriticalMV are the site's levels. 0 follows CoreScope's
+	// thresholds. People can set their own per watch.
+	LowMV      int `yaml:"low_mv"`
+	CriticalMV int `yaml:"critical_mv"`
+	// OverchargeMV is the default level for the overcharge alert, which is
+	// off on every watch until its owner turns it on.
+	OverchargeMV int `yaml:"overcharge_mv"`
+	// Timezone decides where one day ends when finding each night's lowest
+	// reading, and the days named in messages ("critical by Sunday").
+	Timezone string `yaml:"timezone"`
+}
+
+// Location is the battery timezone, falling back to UTC if it can't be
+// loaded (Validate has already refused a bad name when alerts are on).
+func (b BatteryConfig) Location() *time.Location {
+	if loc, err := time.LoadLocation(b.Timezone); err == nil && b.Timezone != "" {
+		return loc
+	}
+	return time.UTC
+}
+
+// Battery level limits, shared by config validation and the watch page form.
+const (
+	MinBatteryMV = 2500
+	MaxBatteryMV = 4500
+	// CoreScope's default thresholds, which a level left at 0 follows unless
+	// CoreScope is configured otherwise.
+	coreScopeLowMV      = 3300
+	coreScopeCriticalMV = 3000
+)
+
 // Default returns the built-in configuration. config.example.yaml documents
 // these same values; keep the two in step.
 func Default() Config {
@@ -286,6 +332,14 @@ func Default() Config {
 			MaxNewAlertsPerPoll: 10,
 			MaxNewAlertFraction: 0.25,
 			MaxWatchesPerUser:   50,
+		},
+		Battery: BatteryConfig{
+			Enabled:         false,
+			CheckEvery:      30 * time.Minute,
+			ConfirmReadings: 2,
+			RecoverMarginMV: 100,
+			OverchargeMV:    4250,
+			Timezone:        "Europe/London",
 		},
 	}
 }
@@ -434,6 +488,55 @@ func (c Config) Validate() error {
 	}
 	if c.Alerts.MaxWatchesPerUser < 1 {
 		return fmt.Errorf("alerts.max_watches_per_user must be at least 1, got %d", c.Alerts.MaxWatchesPerUser)
+	}
+	return c.Battery.validate()
+}
+
+func (b BatteryConfig) validate() error {
+	if !b.Enabled {
+		return nil
+	}
+	if b.CheckEvery < MinPollInterval {
+		return fmt.Errorf("battery.check_every must be at least %s, got %s", MinPollInterval, b.CheckEvery)
+	}
+	if b.ConfirmReadings < 1 {
+		return fmt.Errorf("battery.confirm_readings must be at least 1, got %d", b.ConfirmReadings)
+	}
+	if b.RecoverMarginMV < 0 || b.RecoverMarginMV > 500 {
+		return fmt.Errorf("battery.recover_margin_mv must be between 0 and 500, got %d", b.RecoverMarginMV)
+	}
+	for _, f := range []struct {
+		name string
+		mv   int
+	}{{"low_mv", b.LowMV}, {"critical_mv", b.CriticalMV}, {"overcharge_mv", b.OverchargeMV}} {
+		if f.mv != 0 && (f.mv < MinBatteryMV || f.mv > MaxBatteryMV) {
+			return fmt.Errorf("battery.%s must be 0 or between %d and %d, got %d", f.name, MinBatteryMV, MaxBatteryMV, f.mv)
+		}
+	}
+	// A critical level at or above low would mean "critical" fires first and
+	// "low" never does, which reads as a typo rather than a choice. A level
+	// left at 0 follows CoreScope, judged here at CoreScope's defaults; if
+	// CoreScope is set differently the poller logs any inverted levels it
+	// meets. Setting both levels here avoids depending on CoreScope at all.
+	low, crit := b.LowMV, b.CriticalMV
+	if low == 0 {
+		low = coreScopeLowMV
+	}
+	if crit == 0 {
+		crit = coreScopeCriticalMV
+	}
+	if crit >= low {
+		return fmt.Errorf("battery.critical_mv (%d) must be below battery.low_mv (%d; 0 means CoreScope's %d)",
+			crit, low, coreScopeLowMV)
+	}
+	if _, err := time.LoadLocation(b.Timezone); err != nil || b.Timezone == "" {
+		return fmt.Errorf("battery.timezone %q is not a timezone name like Europe/London", b.Timezone)
+	}
+	if b.OverchargeMV == 0 {
+		return fmt.Errorf("battery.overcharge_mv must be set when battery alerts are enabled")
+	}
+	if b.OverchargeMV <= low {
+		return fmt.Errorf("battery.overcharge_mv (%d) must be above the low level (%d)", b.OverchargeMV, low)
 	}
 	return nil
 }

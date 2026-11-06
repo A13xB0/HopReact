@@ -26,6 +26,106 @@
   <div class="node-key mono" title="{{$w.Watch.TargetKey}}">{{shortKey $w.Watch.TargetKey}}</div>
 </div>
 
+{{/* ---------------------------------------------------------- battery -- */}}
+{{with .BatteryCard}}{{$b := .}}
+<div class="card">
+  <div class="row spread" style="margin-bottom:.5rem">
+    <h3 style="margin:0">Battery</h3>
+    <span class="pill {{if .HasRule}}{{.Class}}{{else}}muted{{end}}"><span class="dot"></span>{{.StateLabel}}</span>
+  </div>
+  {{if .HasReading}}
+  <div class="battery-now">
+    <div>
+      <div class="bigv {{.Class}}-text">{{volts .MV}}</div>
+      <div class="small">read {{since .ReadAt $.Now}}{{with .Reporter}} by {{.}}{{end}}{{if .Stale}} · no newer reading{{end}}</div>
+    </div>
+    {{.Spark}}
+  </div>
+  <div class="rule" style="margin-top:.7rem">
+    <div>
+      <div class="rule-title">{{.Headline}}</div>
+      <div class="small">{{.Detail}}</div>
+      {{range .Ahead}}<div class="small"><b>{{.Label}}:</b> {{.Value}}</div>{{end}}
+    </div>
+  </div>
+  {{else if not .Outdated.IsZero}}
+  <p class="small"><b>No update from CoreScope since {{stamp .Outdated}}.</b>
+  The last reading is too old to show. Any alert stays as it was until a new
+  reading arrives.</p>
+  {{else if .Silent}}
+  <p class="small"><b>No reading in the last week.</b> CoreScope knows this
+  repeater but nobody has read its battery for 7 days, which is also what a flat
+  battery looks like. Any alert stays as it was until a reading arrives.</p>
+  {{else if .NoBattery}}
+  <p class="small"><b>This repeater has no battery fitted.</b> It reports 0 mV,
+  which usually means mains or solar power without a sensor. Nothing to alert on.</p>
+  {{else}}
+  <p class="small"><b>No battery reading yet.</b> Readings come from the repeater's
+  own status reports and from observers that poll it. Alerts start as soon as one arrives.</p>
+  {{end}}
+
+  {{if .HasRule}}
+  <p class="small" style="margin:.7rem 0">Low below {{volts .Levels.LowMV}} · critical below {{volts .Levels.CriticalMV}} · clears at {{volts (add .Levels.LowMV $.Cfg.Battery.RecoverMarginMV)}}</p>
+  <div class="rule">
+    <div>
+      <div class="rule-title">Overcharge alert
+        {{if .Rule.OverchargeOn}}<span class="pill bad"><span class="dot"></span>On · at or above {{volts .Levels.OverchargeMV}}</span>
+        {{else}}<span class="pill muted"><span class="dot"></span>Off</span>{{end}}</div>
+      <div class="small">Tells you if the battery goes above {{if .Rule.OverchargeOn}}{{volts .Levels.OverchargeMV}}{{else}}{{volts .SiteOverMV}}{{end}}.
+      A full cell is 4.20 V, so higher usually means a faulty charger or solar controller, which is a fire risk.</div>
+    </div>
+    <form method="post" action="/watches/{{$w.Watch.ID}}/battery" style="margin:0">
+      <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
+      {{if .Rule.OverchargeOn}}
+      <input type="hidden" name="action" value="overcharge_off">
+      <button class="secondary" type="submit">Turn off</button>
+      {{else}}
+      <input type="hidden" name="action" value="overcharge_on">
+      <button class="secondary" type="submit">Turn on</button>
+      {{end}}
+    </form>
+  </div>
+
+  <details class="edit">
+    <summary>Edit levels</summary>
+    <form method="post" action="/watches/{{$w.Watch.ID}}/battery" class="battery-levels">
+      <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
+      <input type="hidden" name="action" value="levels">
+      <label class="field" for="bl-low-{{$w.Watch.ID}}">Low below</label>
+      <span class="row"><input id="bl-low-{{$w.Watch.ID}}" name="low" inputmode="decimal" size="5"
+        value="{{voltsField .Rule.LowMV}}" placeholder="{{voltsField .SiteLowMV}}"> <span class="small">V · blank uses the site's {{volts .SiteLowMV}}</span></span>
+      <label class="field" for="bl-crit-{{$w.Watch.ID}}">Critical below</label>
+      <span class="row"><input id="bl-crit-{{$w.Watch.ID}}" name="critical" inputmode="decimal" size="5"
+        value="{{voltsField .Rule.CriticalMV}}" placeholder="{{voltsField .SiteCriticalMV}}"> <span class="small">V · blank uses the site's {{volts .SiteCriticalMV}}</span></span>
+      <label class="relay-opt" style="grid-column:1/-1;max-width:none">
+        <input type="checkbox" name="overcharge" {{if .Rule.OverchargeOn}}checked{{end}}>
+        <span><b>Also alert if overcharged</b> at or above
+        <input name="overcharge_level" inputmode="decimal" size="5" aria-label="Overcharge level in volts"
+          value="{{voltsField .Rule.OverchargeMV}}" placeholder="{{voltsField .SiteOverMV}}"> V.
+        Blank uses the site's {{volts .SiteOverMV}}.</span>
+      </label>
+      <div style="grid-column:1/-1"><button type="submit">Save levels</button></div>
+    </form>
+  </details>
+  {{end}}
+
+  <div class="row" style="margin-top:.8rem">
+    {{if .HasReading}}<a href="{{.ScopeURL}}" target="_blank" rel="noopener">Full chart on CoreScope</a>{{end}}
+    <form method="post" action="/watches/{{$w.Watch.ID}}/battery" style="margin:0">
+      <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
+      {{if .HasRule}}
+      <input type="hidden" name="action" value="off">
+      <button class="secondary" type="submit">Turn off battery alerts</button>
+      {{else}}
+      <input type="hidden" name="action" value="on">
+      <span class="small">Battery alerts are off for this repeater.</span>
+      <button type="submit">Turn on</button>
+      {{end}}
+    </form>
+  </div>
+</div>
+{{end}}
+
 {{/* ------------------------------------------------------------ rules -- */}}
 <div class="card">
   <h3>When to tell you</h3>

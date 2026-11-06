@@ -21,7 +21,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
+	"net/textproto"
 	"net/url"
 	"strconv"
 	"strings"
@@ -210,18 +212,122 @@ func (c *Client) CheckMembership(ctx context.Context, userID string) (bool, erro
 // Returns ErrUndeliverable when Discord says it will not deliver, so the
 // caller can stop retrying and tell the user why on the dashboard instead.
 func (c *Client) SendDM(ctx context.Context, userID, content string) error {
+	return c.Send(ctx, userID, Message{Content: content})
+}
+
+// Message is a DM with optional embeds and attached files.
+type Message struct {
+	Content string
+	Embeds  []Embed
+	// Files are attached to the message. An embed shows one as its image
+	// with Image.URL "attachment://<name>".
+	Files []File
+}
+
+// File is one attachment.
+type File struct {
+	Name        string
+	ContentType string
+	Data        []byte
+}
+
+// Embed is a Discord embed: a card under the message with a coloured edge.
+type Embed struct {
+	Title       string       `json:"title,omitempty"`
+	Description string       `json:"description,omitempty"`
+	URL         string       `json:"url,omitempty"`
+	Color       int          `json:"color,omitempty"`
+	Fields      []EmbedField `json:"fields,omitempty"`
+	Image       *EmbedImage  `json:"image,omitempty"`
+	Footer      *EmbedFooter `json:"footer,omitempty"`
+}
+
+type EmbedField struct {
+	Name   string `json:"name"`
+	Value  string `json:"value"`
+	Inline bool   `json:"inline,omitempty"`
+}
+
+type EmbedImage struct {
+	URL string `json:"url"`
+}
+
+type EmbedFooter struct {
+	Text string `json:"text"`
+}
+
+// Send opens a DM channel with the user and posts m. Messages with files go
+// as multipart, which is the only way Discord accepts an attachment.
+func (c *Client) Send(ctx context.Context, userID string, m Message) error {
 	channelID, err := c.createDMChannel(ctx, userID)
 	if err != nil {
 		return err
 	}
-	body, _ := json.Marshal(map[string]any{"content": content})
+	payload := map[string]any{"content": m.Content}
+	if len(m.Embeds) > 0 {
+		payload["embeds"] = m.Embeds
+	}
+	// Mentions in names people chose for their repeaters must never ping
+	// anyone.
+	payload["allowed_mentions"] = map[string]any{"parse": []string{}}
+
+	var body bytes.Buffer
+	contentType := "application/json"
+	if len(m.Files) == 0 {
+		if err := json.NewEncoder(&body).Encode(payload); err != nil {
+			return err
+		}
+	} else {
+		atts := make([]map[string]any, 0, len(m.Files))
+		for i, f := range m.Files {
+			atts = append(atts, map[string]any{"id": i, "filename": f.Name})
+		}
+		payload["attachments"] = atts
+		mw := multipart.NewWriter(&body)
+		pj, err := json.Marshal(payload)
+		if err != nil {
+			return err
+		}
+		h := textproto.MIMEHeader{}
+		h.Set("Content-Disposition", `form-data; name="payload_json"`)
+		h.Set("Content-Type", "application/json")
+		part, err := mw.CreatePart(h)
+		if err != nil {
+			return err
+		}
+		if _, err := part.Write(pj); err != nil {
+			return err
+		}
+		for i, f := range m.Files {
+			h := textproto.MIMEHeader{}
+			h.Set("Content-Disposition", fmt.Sprintf(`form-data; name="files[%d]"; filename=%q`, i, f.Name))
+			ct := f.ContentType
+			if ct == "" {
+				ct = "application/octet-stream"
+			}
+			h.Set("Content-Type", ct)
+			part, err := mw.CreatePart(h)
+			if err != nil {
+				return err
+			}
+			if _, err := part.Write(f.Data); err != nil {
+				return err
+			}
+		}
+		if err := mw.Close(); err != nil {
+			return err
+		}
+		contentType = mw.FormDataContentType()
+	}
+	// bytes.NewReader rather than the buffer itself, so GetBody is set and the
+	// rate-limit retry can resend the same body.
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		fmt.Sprintf("%s/channels/%s/messages", apiBase, channelID), bytes.NewReader(body))
+		fmt.Sprintf("%s/channels/%s/messages", apiBase, channelID), bytes.NewReader(body.Bytes()))
 	if err != nil {
 		return err
 	}
 	req.Header.Set("Authorization", "Bot "+c.BotToken)
-	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Content-Type", contentType)
 	return c.do(req, nil)
 }
 

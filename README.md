@@ -85,10 +85,32 @@ treating a gap in what we can see as proof your node is down.
 Alerts are deliberately quiet: one message when something goes down, one when
 it comes back, and nothing in between — no matter how long it stays down.
 
+## Low battery alerts
+
+Optional, and off unless `battery.enabled` is set. HopReact reads each watched
+repeater's battery from CoreScope, which has readings when the repeater
+reports its own status or an observer polls it.
+
+- **Added once, never pushed.** A watch gets a Low battery rule the first time
+  its repeater reports a battery, and its owner is told in one message. Remove
+  it and it never comes back by itself. People can turn the automatic adding
+  off for their account.
+- **Two levels and an optional third.** A message when the battery goes low,
+  one more if it goes critical, and an overcharge alert that is off until its
+  owner turns it on. The site sets the levels in `config.yaml`; each person can
+  set their own per repeater.
+- **Readings, not polls.** Only a new reading moves anything, two in a row
+  must agree, and a battery has to climb back above the level plus a margin to
+  clear, so a cell sitting on the line stays quiet.
+- **A trend, not a guess.** Each night's lowest reading is compared over the
+  last week, which takes out the day/night swing of solar repeaters. The
+  watch page and the alerts say whether it is draining, charging or holding,
+  and roughly how long until the next level. Alerts carry a chart.
+
 ## Status
 
 Running in production at
-[scotmesh-alerts.mm7roq.compute.oarc.uk](https://scotmesh-alerts.mm7roq.compute.oarc.uk).
+[alerts.scotmesh.net](https://alerts.scotmesh.net).
 Sign-in, watches, per-type rules, polling, the alert engine and Discord
 delivery are all in place and tested.
 

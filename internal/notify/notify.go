@@ -17,6 +17,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"hopreact/internal/discord"
 	"hopreact/internal/poller"
@@ -31,7 +32,7 @@ const maxAttempts = 8
 // Sender is the part of the Discord client this package needs, narrowed so
 // tests can substitute a recorder.
 type Sender interface {
-	SendDM(ctx context.Context, userID, content string) error
+	Send(ctx context.Context, userID string, m discord.Message) error
 }
 
 // Notifier drains queued notifications.
@@ -41,6 +42,11 @@ type Notifier struct {
 	Log     *slog.Logger
 	BaseURL string
 	Now     store.Clock
+	// ScopeURL is CoreScope's address, for the battery chart links.
+	ScopeURL string
+	// Loc names the days in battery messages and ends each day for the
+	// trend. Nil means UTC.
+	Loc *time.Location
 }
 
 // DrainOnce sends everything currently due.
@@ -69,10 +75,10 @@ func (n *Notifier) DrainOnce(ctx context.Context, limit int) (sent int, err erro
 
 	for _, userID := range order {
 		group := byUser[userID]
-		content := n.render(group)
+		msg := n.compose(group)
 		discordID := group[0].DiscordID
 
-		sendErr := n.Sender.SendDM(ctx, discordID, content)
+		sendErr := n.Sender.Send(ctx, discordID, msg)
 		switch {
 		case sendErr == nil:
 			for _, m := range group {
@@ -136,7 +142,87 @@ func (n *Notifier) Run(ctx context.Context, tick <-chan time.Time) {
 	}
 }
 
-// render turns one user's queued transitions into a single Discord message.
+// compose turns one user's queued notifications into a single Discord
+// message: quiet-node alerts first, then battery alerts with their charts,
+// then any "battery alerts are now on" notice, and the link once at the end.
+func (n *Notifier) compose(group []store.Notification) discord.Message {
+	var quiet []store.Notification
+	var batteries []poller.BatteryPayload
+	var enabled []poller.BatteryEnabledPayload
+	for _, m := range group {
+		switch m.Kind {
+		case poller.KindBattery:
+			if p, ok := decodeBattery(m.Payload); ok {
+				batteries = append(batteries, p)
+			}
+		case poller.KindBatteryEnabled:
+			if p, ok := decodeBatteryEnabled(m.Payload); ok {
+				enabled = append(enabled, p)
+			}
+		default:
+			quiet = append(quiet, m)
+		}
+	}
+	var msg discord.Message
+	var parts []string
+	if len(quiet) > 0 {
+		if t := n.render(quiet); t != "" {
+			parts = append(parts, t)
+		}
+	}
+	if len(batteries) > 0 {
+		t, embeds, files := n.batterySection(batteries, n.now())
+		if t != "" {
+			parts = append(parts, strings.TrimRight(t, "\n"))
+		}
+		msg.Embeds, msg.Files = embeds, files
+	}
+	if t := batteryEnabledSection(enabled); t != "" {
+		parts = append(parts, strings.TrimRight(t, "\n"))
+	}
+	link := ""
+	if n.BaseURL != "" {
+		link = fmt.Sprintf("\n\n%s/ — manage your alerts", strings.TrimRight(n.BaseURL, "/"))
+	}
+	msg.Content = fitContent(strings.Join(parts, "\n\n"), link)
+	return msg
+}
+
+// maxContent is Discord's limit on a message's text. Past it Discord refuses
+// the whole message, which would drop every alert in it.
+const maxContent = 2000
+
+// fitContent cuts body at a line break so body plus tail fits Discord's
+// limit, saying how many lines were left out. The tail (the link) always
+// survives, since it is where the rest can be seen.
+func fitContent(body, tail string) string {
+	if utf8.RuneCountInString(body)+utf8.RuneCountInString(tail) <= maxContent {
+		return body + tail
+	}
+	lines := strings.Split(body, "\n")
+	for n := len(lines) - 1; n > 0; n-- {
+		more := fmt.Sprintf("\n…and %d more lines, see the site.", len(lines)-n)
+		cut := strings.Join(lines[:n], "\n") + more
+		if utf8.RuneCountInString(cut)+utf8.RuneCountInString(tail) <= maxContent {
+			return cut + tail
+		}
+	}
+	runes := []rune(body)
+	keep := maxContent - utf8.RuneCountInString(tail) - 1
+	if keep < 0 {
+		keep = 0
+	}
+	return string(runes[:min(keep, len(runes))]) + "…" + tail
+}
+
+func (n *Notifier) now() time.Time {
+	if n.Now != nil {
+		return n.Now().UTC()
+	}
+	return time.Now().UTC()
+}
+
+// render turns one user's queued quiet-node transitions into text.
 func (n *Notifier) render(group []store.Notification) string {
 	type item struct {
 		p poller.AlertPayload
@@ -183,10 +269,7 @@ func (n *Notifier) render(group []store.Notification) string {
 			b.WriteString(line(it.p))
 		}
 	}
-	if n.BaseURL != "" {
-		fmt.Fprintf(&b, "\n%s/ — manage your alerts", strings.TrimRight(n.BaseURL, "/"))
-	}
-	return b.String()
+	return strings.TrimRight(b.String(), "\n")
 }
 
 // line renders one watch. A watch whose rules all tripped in the same poll

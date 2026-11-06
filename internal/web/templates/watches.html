@@ -21,6 +21,17 @@
 </div>
 {{end}}
 
+{{if and .BatteryOn .User}}{{if gt .User.BatteryBanner 0}}
+<div class="banner">
+  <strong>🔋 Battery alerts are now on for {{.User.BatteryBanner}} of your repeaters.</strong>
+  You'll get a message if one of their batteries gets low. Turn it off for any
+  repeater on its page.
+  <form method="post" action="/account/battery-banner" style="margin:.5rem 0 0">
+    <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+    <button class="secondary" type="submit">Got it</button>
+  </form>
+</div>
+{{end}}{{end}}
 <div class="card">
   <div class="row spread">
     <h2 style="margin:0">Your nodes</h2>
@@ -42,7 +53,7 @@ quiet before HopReact messages you.</p></div>
 <div class="card">
 <div style="overflow-x:auto">
 <table>
-<thead><tr><th>Node</th><th>Status</th><th>Last seen</th><th>Rules</th><th></th></tr></thead>
+<thead><tr><th>Node</th><th>Status</th><th>Last seen</th>{{if .BatteryOn}}<th>Battery</th>{{end}}<th>Rules</th><th></th></tr></thead>
 <tbody>
 {{range .Watches}}
 {{$worst := .Worst}}
@@ -58,14 +69,26 @@ quiet before HopReact messages you.</p></div>
     {{else}}
       <span class="pill muted"><span class="dot"></span>No rules</span>
     {{end}}
+    {{with index $.Battery .Watch.ID}}{{if and .HasRule (or (eq .Rule.Level "low") (eq .Rule.Level "critical") (eq .Rule.Level "overcharged"))}}
+      <br><span class="pill {{.Class}}" style="margin-top:.3rem"><span class="dot"></span>Battery {{.Rule.Level}}</span>
+    {{end}}{{end}}
     {{if .Watch.MutedUntil.IsZero}}{{else}}<br><span class="small">muted until {{stamp .Watch.MutedUntil}}</span>{{end}}
   </td>
   <td data-label="last seen">
     {{if .Target}}{{since .Target.LastSeen $.Now}}<br><span class="small">{{stamp .Target.LastSeen}}</span>
     {{else}}<span class="small">CoreScope has never reported this key</span>{{end}}
   </td>
+  {{if $.BatteryOn}}
+  <td data-label="battery">
+    {{with index $.Battery .Watch.ID}}
+      <span class="pill {{.Class}}">{{.Chip}}</span>
+      {{with .Short}}<br><span class="small">{{.}}</span>{{end}}
+    {{else}}<span class="small">—</span>{{end}}
+  </td>
+  {{end}}
   <td class="small" data-label="rules">
     {{range .Rules}}{{ruleTitle .Rule}} · {{.Rule.ThresholdHours}}h<br>{{end}}
+    {{with index $.Battery .Watch.ID}}{{if .HasRule}}Low battery · below {{volts .Levels.LowMV}}<br>{{end}}{{end}}
     <a href="/watches/{{.Watch.ID}}">Change…</a>
   </td>
   <td data-label="">
@@ -79,6 +102,23 @@ quiet before HopReact messages you.</p></div>
 </tbody>
 </table>
 </div>
+</div>
+{{end}}
+
+{{if .BatteryOn}}
+<div class="card">
+  <h3 style="margin-top:0">Battery alerts</h3>
+  <form method="post" action="/account/battery" class="row" style="align-items:flex-start;flex-wrap:nowrap">
+    <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+    <label class="relay-opt" style="max-width:none">
+      <input type="checkbox" name="auto_battery" {{if .User.AutoBattery}}checked{{end}}>
+      <span><b>Add battery alerts to my repeaters automatically.</b>
+      When a repeater you watch reports a battery, HopReact adds a Low battery
+      rule to it. Turning this off stops new ones being added. It doesn't
+      remove the ones you have.</span>
+    </label>
+    <button class="secondary" type="submit">Save</button>
+  </form>
 </div>
 {{end}}
 

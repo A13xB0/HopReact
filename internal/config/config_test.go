@@ -232,3 +232,38 @@ func chdir(t *testing.T, dir string) {
 		}
 	})
 }
+
+func TestBatteryValidation(t *testing.T) {
+	ok := Default()
+	ok.Battery.Enabled = true
+	ok.Battery.LowMV, ok.Battery.CriticalMV = 3650, 3500
+	if err := ok.Validate(); err != nil {
+		t.Fatalf("ScotMesh's settings rejected: %v", err)
+	}
+	if Default().Battery.Enabled {
+		t.Fatal("battery alerts must be off by default")
+	}
+	for name, bad := range map[string]func(*BatteryConfig){
+		"critical above low":             func(b *BatteryConfig) { b.CriticalMV = 3700 },
+		"critical above CoreScope's low": func(b *BatteryConfig) { b.LowMV, b.CriticalMV = 0, 3400 },
+		"out of range":                   func(b *BatteryConfig) { b.LowMV = 5000 },
+		"overcharge too low":             func(b *BatteryConfig) { b.OverchargeMV = 3600 },
+		"no overcharge":                  func(b *BatteryConfig) { b.OverchargeMV = 0 },
+		"bad timezone":                   func(b *BatteryConfig) { b.Timezone = "Mars/Olympus" },
+		"checks too often":               func(b *BatteryConfig) { b.CheckEvery = time.Second },
+		"zero confirmations":             func(b *BatteryConfig) { b.ConfirmReadings = 0 },
+	} {
+		c := ok
+		bad(&c.Battery)
+		if err := c.Validate(); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+	// Off, nothing is checked: a half-written battery section can't stop the
+	// service starting.
+	off := Default()
+	off.Battery.LowMV = 1
+	if err := off.Validate(); err != nil {
+		t.Errorf("battery settings checked while off: %v", err)
+	}
+}

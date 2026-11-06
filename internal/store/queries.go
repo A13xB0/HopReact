@@ -40,17 +40,19 @@ func (s *Store) UpsertUser(ctx context.Context, discordID, username, avatar stri
 }
 
 const userCols = `id, discord_id, username, COALESCE(avatar,''), created_at,
-	last_login_at, dm_ok, COALESCE(dm_failed_reason,''), dm_checked_at`
+	last_login_at, dm_ok, COALESCE(dm_failed_reason,''), dm_checked_at,
+	auto_battery, battery_banner`
 
 func scanUser(row interface{ Scan(...any) error }) (User, error) {
 	var u User
 	var created, login int64
-	var dmOK int
+	var dmOK, autoBattery int
 	var checked sql.NullInt64
 	if err := row.Scan(&u.ID, &u.DiscordID, &u.Username, &u.Avatar, &created,
-		&login, &dmOK, &u.DMFailedReason, &checked); err != nil {
+		&login, &dmOK, &u.DMFailedReason, &checked, &autoBattery, &u.BatteryBanner); err != nil {
 		return User{}, err
 	}
+	u.AutoBattery = autoBattery != 0
 	u.CreatedAt = time.Unix(created, 0).UTC()
 	u.LastLoginAt = time.Unix(login, 0).UTC()
 	u.DMOK = dmOK != 0
@@ -417,13 +419,19 @@ func (s *Store) CreateWatch(ctx context.Context, w Watch, maxPerUser int) (int64
 			return ErrWatchLimit
 		}
 
+		// Unticking "also tell me when its battery gets low" marks the watch
+		// as having made its battery choice, so none is ever added by itself.
+		var batteryAdded time.Time
+		if w.NoBattery {
+			batteryAdded = now
+		}
 		res, err := tx.ExecContext(ctx, `
 			INSERT INTO watches (user_id, target_kind, target_key, threshold_hours,
-				alert_on_relay, label, muted_until, notify_recovery, created_at)
-			VALUES (?,?,?,?,?,?,?,?,?)`,
+				alert_on_relay, label, muted_until, notify_recovery, created_at, battery_added_at)
+			VALUES (?,?,?,?,?,?,?,?,?,?)`,
 			w.UserID, w.TargetKind, strings.ToLower(w.TargetKey), w.ThresholdHours,
 			boolInt(w.AlertOnRelay), nullString(w.Label), nullInt(w.MutedUntil),
-			boolInt(w.NotifyRecovery), now.Unix())
+			boolInt(w.NotifyRecovery), now.Unix(), nullInt(batteryAdded))
 		if err != nil {
 			if strings.Contains(err.Error(), "UNIQUE") {
 				return ErrDuplicateWatch
@@ -440,6 +448,9 @@ func (s *Store) CreateWatch(ctx context.Context, w Watch, maxPerUser int) (int64
 			if _, err := s.insertRuleTx(ctx, tx, r, w.TargetKind, strings.ToLower(w.TargetKey), now); err != nil {
 				return err
 			}
+		}
+		if w.WithBattery && !w.NoBattery {
+			return s.InsertBatteryRuleTx(ctx, tx, BatteryRule{WatchID: id}, now)
 		}
 		return nil
 	})
@@ -935,17 +946,19 @@ func decodeTypes(s string) []int {
 }
 
 const watchCols = `id, user_id, target_kind, target_key, threshold_hours,
-	alert_on_relay, COALESCE(label,''), muted_until, notify_recovery, created_at`
+	alert_on_relay, COALESCE(label,''), muted_until, notify_recovery, created_at,
+	battery_added_at`
 
 func scanWatch(row interface{ Scan(...any) error }) (Watch, error) {
 	var w Watch
 	var relay, recovery int
-	var muted sql.NullInt64
+	var muted, batteryAdded sql.NullInt64
 	var created int64
 	if err := row.Scan(&w.ID, &w.UserID, &w.TargetKind, &w.TargetKey, &w.ThresholdHours,
-		&relay, &w.Label, &muted, &recovery, &created); err != nil {
+		&relay, &w.Label, &muted, &recovery, &created, &batteryAdded); err != nil {
 		return Watch{}, err
 	}
+	w.BatteryAddedAt = timeFrom(batteryAdded)
 	w.AlertOnRelay = relay != 0
 	w.NotifyRecovery = recovery != 0
 	w.MutedUntil = timeFrom(muted)
