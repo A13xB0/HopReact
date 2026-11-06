@@ -5,7 +5,7 @@
   many hours of silence means trouble, and the bot will send you a Discord DM
   when one stops being seen.</p>
   <p class="small">It watches the same public CoreScope data the coverage map
-  uses. There is no email address and no password involved — signing in with
+  uses. There is no email address and no password involved. Signing in with
   Discord is the whole account.</p>
   <p><a class="btn" href="/auth/login">Sign in with Discord</a></p>
 </div>
@@ -15,7 +15,7 @@
     <li><strong>One message when it goes down, one when it returns.</strong>
       A node that stays down for a week doesn't message you every five minutes.</li>
     <li><strong>Nothing for something already broken.</strong> Add a watch to a
-      node that is already quiet and you get no alert — you knew.</li>
+      node that is already quiet and you get no alert, because you already knew.</li>
     <li><strong>Not heard</strong> is the default signal. You can additionally
       alert on <strong>stopped relaying</strong> for a node that should be
       carrying traffic.</li>
@@ -27,7 +27,7 @@
 <div class="card">
   <h3 style="margin-top:0">One thing to know</h3>
   <p>A Discord bot can only DM someone it shares a server with, so signing in
-  adds you to the {{.Cfg.Site.Name}} Discord. <strong>Stay in it</strong> —
+  adds you to the {{.Cfg.Site.Name}} Discord. <strong>Stay in it</strong>:
   leaving silently stops the alerts arriving.</p>
 </div>
 {{end}}
