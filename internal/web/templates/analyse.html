@@ -44,6 +44,13 @@
 .ac .ac-band{fill:#5aa9ff;opacity:.18}
 .ac .ac-nowline{stroke:var(--muted);stroke-width:1}
 .ac .ac-nowlabel{fill:var(--text)}
+.ac .ac-frozen{fill:#7dd3fc;opacity:.28}
+.ac .ac-frozen-tick{fill:#7dd3fc}
+.ac .ac-zero{stroke:#7dd3fc;stroke-width:1;stroke-dasharray:3 3}
+.ac .ac-zero-t{fill:#7dd3fc}
+.ac .ac-dev-exp{fill:none;stroke:var(--orange);stroke-width:1.6;stroke-dasharray:5 4;opacity:.8}
+.legend i.lg-exp{background:transparent;border:0;border-top:2px dashed var(--orange);border-radius:0;height:0;vertical-align:3px}
+.ledger .frz{color:#7dd3fc;cursor:help}
 .ac .ac-noproj{fill:var(--text);font-size:13px;font-weight:600}
 .fc-toggle{display:inline-flex;gap:.45rem;align-items:center;font-size:.85rem;color:var(--muted);text-decoration:none}
 .fc-toggle:hover{color:var(--text)}
@@ -136,6 +143,8 @@
     {{end}}
     {{if $a.HasTemps}}<span><i style="background:var(--orange);border-color:var(--orange)"></i>Repeater temperature</span>{{end}}
     {{if $a.Projected}}<span><i class="lg-proj"></i>Forecast voltage and its likely range</span>{{end}}
+    {{if $a.ExpTemp}}<span><i class="lg-exp"></i>Expected repeater temperature</span>{{end}}
+    {{if $a.Frozen}}<span><i style="background:#7dd3fc;border-color:#7dd3fc"></i>Too cold to charge (below 0 °C at the battery)</span>{{end}}
   </div>
   {{if and $a.ShowForecast $a.NoForecast}}<p class="notice"><b>Not enough data to forecast the battery yet.</b> {{$a.NoForecast}} The forecast weather is still shown.</p>{{end}}
 </div>
@@ -153,7 +162,7 @@
       {{range $a.Ledger}}
         <tr{{if .Suspect}} class="suspect" title="Plenty of sun but almost no charge"{{end}}>
           <td>{{.Day}}</td><td class="wo">{{.Rise}}</td><td class="wo">{{.Set}}</td><td class="wo">{{.Daylight}}</td>
-          {{if $a.Weather}}<td>{{.Cloud}}</td><td>{{.Sun}}{{if .SunBar}}<span class="bar" style="width:{{.SunBar}}px"></span>{{end}}</td>{{end}}
+          {{if $a.Weather}}<td>{{.Cloud}}</td><td>{{if .Frozen}}<span class="frz" title="Too cold to charge for {{.Frozen}} sunny hour{{if gt .Frozen 1}}s{{end}}">❄</span> {{end}}{{.Sun}}{{if .SunBar}}<span class="bar" style="width:{{.SunBar}}px"></span>{{end}}</td>{{end}}
           <td class="wo {{.GainClass}}">{{.Gain}}</td><td class="wo {{.OvernightClass}}">{{.Overnight}}</td><td class="{{.NetClass}}">{{.Net}}</td>
         </tr>
       {{end}}

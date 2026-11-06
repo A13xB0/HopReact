@@ -3,6 +3,7 @@ package batteryanalysis
 import (
 	"fmt"
 	"math"
+	"strings"
 	"time"
 
 	"hopreact/internal/batteryview"
@@ -259,6 +260,9 @@ func (r Result) ForecastText(loc *time.Location) string {
 	} else {
 		text += fmt.Sprintf(" Expect %.2f to %s by %s.", float64(lo)/1000, batteryview.Volts(hi), dayName(last.Morning, loc))
 	}
+	if cold := r.coldDays(loc); cold != "" {
+		text += " " + cold
+	}
 	if len(r.Crossings) > 0 {
 		c := r.Crossings[len(r.Crossings)-1] // low comes before critical when both
 		for _, x := range r.Crossings {
@@ -313,4 +317,43 @@ func spanWords(d time.Duration) string {
 	default:
 		return fmt.Sprintf("%d days", days)
 	}
+}
+
+// coldDays names the forecast days too cold at the battery to charge for
+// some or all of their sunshine.
+func (r Result) coldDays(loc *time.Location) string {
+	var all, part []string
+	for _, f := range r.Forecast {
+		switch {
+		case f.FrozenHours == 0:
+		case f.UsableKWh == 0:
+			all = append(all, f.Rise.In(locOr(loc)).Format("Monday"))
+		default:
+			part = append(part, f.Rise.In(locOr(loc)).Format("Monday"))
+		}
+	}
+	var out []string
+	if len(all) > 0 {
+		out = append(out, "Too cold to charge at all on "+joinAnd(all)+".")
+	}
+	if len(part) > 0 {
+		out = append(out, "Too cold to charge for part of "+joinAnd(part)+".")
+	}
+	if len(out) == 0 {
+		return ""
+	}
+	basis := " Lithium cells don't charge below 0 °C."
+	if !r.HasTempOffset {
+		// Without the repeater's own readings, the air is all there is, and
+		// an enclosure in the sun often runs warmer.
+		basis = " Lithium cells don't charge below 0 °C. This is from the air temperature; the repeater may run warmer."
+	}
+	return strings.Join(out, " ") + basis
+}
+
+func joinAnd(s []string) string {
+	if len(s) < 2 {
+		return strings.Join(s, "")
+	}
+	return strings.Join(s[:len(s)-1], ", ") + " and " + s[len(s)-1]
 }

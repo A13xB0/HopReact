@@ -56,8 +56,14 @@
     // Weather hours are stamped at their end.
     var h = nearest((d.Hours || []).map(function (x) { return [x[0] - 1800, x[1], x[2], x[3]]; }), t, 3600);
     if (h) text(tip, "Sun " + h[1] + " W/m² · cloud " + h[2] + "% · air " + h[3] + " °C");
-    var tc = nearest(d.Temps, t, 3 * 3600);
-    if (tc) text(tip, "Repeater " + Math.round(tc[1]) + " °C");
+    var cold = nearest((d.Cold || []).map(function (x) { return [x[0] - 1800, x[1], x[2]]; }), t, 1800);
+    if (t > d.Now) {
+      if (cold) text(tip, "Repeater about " + Math.round(cold[1]) + " °C (expected)");
+    } else {
+      var tc = nearest(d.Temps, t, 3 * 3600);
+      if (tc) text(tip, "Repeater " + Math.round(tc[1]) + " °C");
+    }
+    if (cold && cold[2]) text(tip, "Too cold to charge (below 0 °C)");
     tip.hidden = false;
     var wr = wrap.getBoundingClientRect();
     var px = ev.clientX - wr.left + 12;

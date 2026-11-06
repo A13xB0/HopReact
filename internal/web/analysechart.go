@@ -37,6 +37,11 @@ type chartInput struct {
 	// NoProj marks the forecast area as having no battery forecast; the
 	// page says why underneath.
 	NoProj bool
+	// Cold is the battery's estimated temperature by hour: frozen sunny
+	// hours are shaded, and the expected temperature ahead is drawn.
+	Cold []batteryanalysis.ColdHour
+	// NoExpTemp leaves out the expected temperature line ahead.
+	NoExpTemp bool
 }
 
 // axisEnd is where the time axis stops.
@@ -200,6 +205,13 @@ func analysisChart(c chartInput, compact bool) template.HTML {
 			b.f(`<circle cx="%.1f" cy="%.1f" r="1.8" class="ac-dot"/>`, x(s.At), y(float64(s.MV)))
 		}
 	}
+	// A blue tick under the readings for each sunny hour too cold to charge.
+	for _, ch := range c.Cold {
+		if ch.Frozen && !ch.At.Add(-time.Hour).Before(t0) && !ch.At.After(t1) {
+			b.f(`<rect x="%.1f" y="%.1f" width="%.2f" height="4" class="ac-frozen-tick"/>`,
+				x(ch.At.Add(-time.Hour)), top+vH-4, math.Max(1, x(ch.At)-x(ch.At.Add(-time.Hour))))
+		}
+	}
 	// The forecast: a faint band for the likely range and a dotted line.
 	if len(c.Proj) > 1 {
 		var band []string
@@ -300,6 +312,11 @@ func analysisChart(c chartInput, compact bool) template.HTML {
 			for _, t := range c.Temps {
 				tlo, thi = math.Min(tlo, t.C), math.Max(thi, t.C)
 			}
+			for _, ch := range c.Cold {
+				if !c.NoExpTemp && ch.Estimated && ch.At.After(c.To) {
+					tlo, thi = math.Min(tlo, ch.TempC), math.Max(thi, ch.TempC)
+				}
+			}
 			if math.IsInf(tlo, 1) {
 				continue
 			}
@@ -308,6 +325,26 @@ func analysisChart(c chartInput, compact bool) template.HTML {
 				thi = tlo + 10
 			}
 			ty := func(v float64) float64 { return st + h - (v-tlo)/(thi-tlo)*h }
+			// Sunny hours too cold to charge in, and the freezing line.
+			for _, ch := range c.Cold {
+				if ch.Frozen && !ch.At.Add(-time.Hour).Before(t0) && !ch.At.After(t1) {
+					b.f(`<rect x="%.1f" y="%.1f" width="%.2f" height="%.0f" class="ac-frozen"/>`,
+						x(ch.At.Add(-time.Hour)), st, math.Max(1, x(ch.At)-x(ch.At.Add(-time.Hour))), h)
+				}
+			}
+			if tlo < 0 && thi > 0 {
+				b.f(`<line x1="%.0f" x2="%.0f" y1="%.1f" y2="%.1f" class="ac-zero"/>`, left, right, ty(0), ty(0))
+				b.text(right-4, ty(0)-3, "ac-t ac-s ac-zero-t", "end", "0 °C: no charging below")
+			}
+			var exp []string
+			for _, ch := range c.Cold {
+				if !c.NoExpTemp && ch.Estimated && ch.At.After(c.To) && !ch.At.After(t1) {
+					exp = append(exp, fmt.Sprintf("%.1f,%.1f", x(ch.At.Add(-30*time.Minute)), ty(ch.TempC)))
+				}
+			}
+			if len(exp) > 1 {
+				b.f(`<polyline points="%s" class="ac-dev-exp"/>`, strings.Join(exp, " "))
+			}
 			var air []string
 			for _, hr := range c.Hours {
 				if !hr.At.Before(t0) && !hr.At.After(t1) {

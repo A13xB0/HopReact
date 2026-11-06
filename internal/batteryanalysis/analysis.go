@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"hopreact/internal/alert"
+	"hopreact/internal/corescope"
 	"hopreact/internal/sun"
 	"hopreact/internal/weather"
 )
@@ -83,7 +84,18 @@ type Input struct {
 	// FitFrom, when before From, lets the break-even learn from more days
 	// than are shown, so a short range can still be forecast.
 	FitFrom time.Time
+	// Temps are the repeater's own temperature readings, which tell when it
+	// was too cold to charge and how much warmer than the air it runs.
+	Temps []corescope.TempSample
 }
+
+// NoChargeBelowC is the temperature below which a lithium cell must not be
+// charged; chargers stop, so sunshine in those hours gives nothing.
+const NoChargeBelowC = 0.0
+
+// minOffsetPairs is how many daylight readings of the repeater's own
+// temperature it takes to trust how much warmer than the air it runs.
+const minOffsetPairs = 6
 
 // Day is one sunrise to the next: a day of charging and the night after it.
 type Day struct {
@@ -92,6 +104,10 @@ type Day struct {
 	HasWeather bool
 	SunKWh     float64 // sunlight energy on flat ground, kWh/m²
 	CloudPct   float64 // mean cloud while the sun was up
+	// UsableKWh is the sunshine in hours warm enough to charge, and
+	// FrozenHours how many sunny hours were too cold.
+	UsableKWh   float64
+	FrozenHours int
 
 	MorningLowMV int // lowest reading around this sunrise; 0 if unknown
 	HighMV       int // highest from sunrise to after sunset; 0 if unknown
@@ -125,6 +141,10 @@ func (f Fit) NetFor(sunKWh float64) float64 { return f.InterceptMV + f.SlopeMVPe
 // ForecastDay is one projected day.
 type ForecastDay struct {
 	Rise time.Time
+	// UsableKWh and FrozenHours as for Day: sun warm enough to charge in,
+	// and sunny hours expected too cold.
+	UsableKWh   float64
+	FrozenHours int
 	// Morning is the next sunrise, when the projected low applies.
 	Morning time.Time
 	SunKWh  float64
@@ -176,6 +196,12 @@ type Result struct {
 	LatestAt time.Time
 	// age is how old the latest reading was at Now.
 	age time.Duration
+	// cold estimates the battery's temperature hour by hour.
+	cold coldModel
+	// TempOffsetC is how much warmer than the air the repeater runs in
+	// daylight, learned from its own readings, when HasTempOffset.
+	TempOffsetC   float64
+	HasTempOffset bool
 }
 
 // maxStartAge is the oldest a reading can be to start a forecast from.
@@ -201,7 +227,9 @@ func Analyse(in Input) Result {
 	if !in.FitFrom.IsZero() && in.FitFrom.Before(in.From) {
 		learn.From = in.FitFrom
 	}
-	allDays := ledger(within(in.Samples, learn.From, in.Now), learn)
+	r.cold = newColdModel(in.Temps, in.Weather)
+	r.TempOffsetC, r.HasTempOffset = r.cold.offset, r.cold.hasOffset
+	allDays := ledger(within(in.Samples, learn.From, in.Now), learn, r.cold)
 	for _, d := range allDays {
 		if !d.Set.Before(in.From) {
 			r.Days = append(r.Days, d)
@@ -231,7 +259,7 @@ func Analyse(in Input) Result {
 		for _, d := range r.Days {
 			if d.HasNet && d.HasWeather {
 				r.CompleteDays++
-				if d.SunKWh >= r.Fit.BreakEvenKWh {
+				if d.UsableKWh >= r.Fit.BreakEvenKWh {
 					r.BrokeEven++
 				}
 			}
@@ -268,7 +296,7 @@ func extreme(s []alert.Sample, from, to time.Time, highest bool) (int, int) {
 	return best, n
 }
 
-func ledger(s []alert.Sample, in Input) []Day {
+func ledger(s []alert.Sample, in Input, c coldModel) []Day {
 	// One day either side so the first day has its sunrise and the last its
 	// next sunrise.
 	all := sun.Days(in.From.Add(-36*time.Hour), in.Now.Add(36*time.Hour), in.Lat, in.Lon)
@@ -299,8 +327,11 @@ func ledger(s []alert.Sample, in Input) []Day {
 		if d.MorningLowMV > 0 && d.NextLowMV > 0 {
 			d.HasNet, d.NetMV = true, d.NextLowMV-d.MorningLowMV
 		}
-		d.HasWeather, d.SunKWh, d.CloudPct = dayWeather(in.Weather, d)
-		d.PanelSuspect = d.HasGain && wellCovered && d.HasWeather && d.SunKWh >= panelSunKWh &&
+		w := dayWeather(in.Weather, d, c)
+		d.HasWeather, d.SunKWh, d.CloudPct, d.UsableKWh, d.FrozenHours = w.ok, w.sunKWh, w.cloud, w.usableKWh, w.frozen
+		// A frozen battery can't charge, so cold days say nothing about the
+		// panel.
+		d.PanelSuspect = d.HasGain && wellCovered && d.HasWeather && d.UsableKWh >= panelSunKWh &&
 			d.GainMV < panelGainMV && d.MorningLowMV < roomToFillMV
 		out = append(out, d)
 	}
@@ -325,8 +356,15 @@ func morningLow(s []alert.Sample, rise, now time.Time) int {
 
 // dayWeather sums the sunshine from one sunrise to the next and averages
 // the cloud while the sun was up.
-func dayWeather(hours []weather.Hour, d Day) (bool, float64, float64) {
-	var sunWh, cloud float64
+type dayWx struct {
+	ok                       bool
+	sunKWh, usableKWh, cloud float64
+	frozen                   int
+}
+
+func dayWeather(hours []weather.Hour, d Day, c coldModel) dayWx {
+	var w dayWx
+	var sunWh, usableWh, cloud float64
 	n, nc := 0, 0
 	for _, h := range hours {
 		if !h.At.After(d.Rise) || h.At.After(d.NextRise) {
@@ -334,6 +372,11 @@ func dayWeather(hours []weather.Hour, d Day) (bool, float64, float64) {
 		}
 		n++
 		sunWh += h.SunWm2
+		if c.frozen(h) {
+			w.frozen++
+		} else {
+			usableWh += h.SunWm2
+		}
 		if !h.At.After(d.Set.Add(time.Hour)) {
 			cloud += h.CloudPct
 			nc++
@@ -341,9 +384,10 @@ func dayWeather(hours []weather.Hour, d Day) (bool, float64, float64) {
 	}
 	want := int(d.NextRise.Sub(d.Rise).Hours())
 	if n == 0 || n < want-1 || nc == 0 {
-		return false, 0, 0
+		return dayWx{}
 	}
-	return true, sunWh / 1000, cloud / float64(nc)
+	w.ok, w.sunKWh, w.usableKWh, w.cloud = true, sunWh/1000, usableWh/1000, cloud/float64(nc)
+	return w
 }
 
 // morningNet is the change between the first and last known morning lows,
@@ -425,8 +469,8 @@ func fit(days []Day) (*Fit, string) {
 	lo, hi := math.Inf(1), math.Inf(-1)
 	for _, d := range days {
 		if d.HasNet && d.HasWeather {
-			pts = append(pts, [2]float64{d.SunKWh, float64(d.NetMV)})
-			lo, hi = math.Min(lo, d.SunKWh), math.Max(hi, d.SunKWh)
+			pts = append(pts, [2]float64{d.UsableKWh, float64(d.NetMV)})
+			lo, hi = math.Min(lo, d.UsableKWh), math.Max(hi, d.UsableKWh)
 		}
 	}
 	if len(pts) < minFitDays {
@@ -506,16 +550,18 @@ func forecast(r *Result, s []alert.Sample, in Input) {
 	mid := mv
 	for i := 0; i+1 < len(days) && len(r.Forecast) < ForecastDays; i++ {
 		d := Day{Rise: days[i].Rise, Set: days[i].Set, NextRise: days[i+1].Rise}
-		ok, sunKWh, _ := dayWeather(in.Weather, d)
-		if !ok {
+		w := dayWeather(in.Weather, d, r.cold)
+		if !w.ok {
 			break
 		}
-		net := r.Fit.NetFor(sunKWh)
+		sunKWh := w.sunKWh
+		net := r.Fit.NetFor(w.usableKWh)
 		mid = math.Min(float64(alert.FullMV), mid+net)
 		k := float64(len(r.Forecast) + 1)
 		spread := r.Fit.SpreadMV * math.Sqrt(k)
 		r.Forecast = append(r.Forecast, ForecastDay{
 			Rise: d.Rise, Morning: d.NextRise, SunKWh: sunKWh, NetMV: net, MidMV: mid,
+			UsableKWh: w.usableKWh, FrozenHours: w.frozen,
 			LowMV:  math.Min(float64(alert.FullMV), mid-spread),
 			HighMV: math.Min(float64(alert.FullMV), mid+spread),
 		})
@@ -564,7 +610,11 @@ func (r Result) Project(hours []weather.Hour, until time.Time) []ProjPoint {
 		}
 		frac := h.At.Sub(last).Hours()
 		last = h.At
-		v += r.Fit.InterceptMV/24*frac + r.Fit.SlopeMVPerKWh*h.SunWm2/1000*frac
+		gain := r.Fit.SlopeMVPerKWh * h.SunWm2 / 1000 * frac
+		if r.cold.frozen(h) {
+			gain = 0 // the charger won't charge a frozen cell
+		}
+		v += r.Fit.InterceptMV/24*frac + gain
 		v = math.Min(float64(alert.FullMV), v)
 		spread := r.Fit.SpreadMV * math.Sqrt(h.At.Sub(start).Hours()/24)
 		out = append(out, ProjPoint{At: h.At, MidMV: v,

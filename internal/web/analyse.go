@@ -60,6 +60,9 @@ type analysisView struct {
 	Projected    bool // a voltage projection was drawn
 	// NoForecast says why there's no battery forecast, when there isn't.
 	NoForecast string
+	// Frozen is set when some sunny hours were or will be too cold to
+	// charge in, and ExpTemp when the expected temperature ahead is drawn.
+	Frozen, ExpTemp bool
 }
 
 // fitWindow is how much history the break-even always learns from, whatever
@@ -103,6 +106,8 @@ type ledgerRow struct {
 	Gain, Overnight, Net                 string
 	GainClass, OvernightClass, NetClass  string
 	Suspect                              bool
+	// Frozen counts sunny hours too cold to charge in.
+	Frozen int
 }
 
 // handleAnalyse shows one watch's battery against daylight and weather.
@@ -219,7 +224,7 @@ func (s *Server) analysis(ctx context.Context, view store.WatchView, days int, f
 	av.Weather = len(hours) > 0
 
 	in := batteryanalysis.Input{Samples: samples, From: from, Now: now, HasPosition: av.HasPosition,
-		Lat: lat, Lon: lon, Weather: hours, Levels: levels, Loc: loc, FitFrom: fitFrom}
+		Lat: lat, Lon: lon, Weather: hours, Levels: levels, Loc: loc, FitFrom: fitFrom, Temps: temps}
 	res := batteryanalysis.Analyse(in)
 	av.Verdict = res.Verdict(loc)
 	av.Mains = res.Mains
@@ -229,7 +234,13 @@ func (s *Server) analysis(ctx context.Context, view store.WatchView, days int, f
 	}
 	av.Ledger = ledgerRows(res.Days, now, loc)
 
-	ch := chartInput{Samples: within(samples, from, now), Temps: temps, Hours: hours, Spans: res.Spans,
+	var shownTemps []corescope.TempSample
+	for _, t := range temps {
+		if !t.At.Before(from) && !t.At.After(now) {
+			shownTemps = append(shownTemps, t)
+		}
+	}
+	ch := chartInput{Samples: within(samples, from, now), Temps: shownTemps, Hours: hours, Spans: res.Spans,
 		From: from, To: now, Levels: levels, Loc: loc}
 	av.CanForecast = av.Weather && !res.Mains
 	if av.CanForecast && forecast {
@@ -244,6 +255,17 @@ func (s *Server) analysis(ctx context.Context, view store.WatchView, days int, f
 	}
 	if av.CanForecast && len(res.Forecast) == 0 {
 		av.NoForecast = res.NoForecastReason()
+	}
+	ch.Cold = res.ColdHours(hours, from, ch.axisEnd().Add(time.Hour))
+	for _, x := range ch.Cold {
+		av.Frozen = av.Frozen || x.Frozen
+		av.ExpTemp = av.ExpTemp || (x.Estimated && x.At.After(now) && ch.End.After(now))
+	}
+	// The expected temperature ahead is only worth drawing when it comes from
+	// the repeater's own readings; otherwise it's just the air line again.
+	if !res.HasTempOffset {
+		av.ExpTemp = false
+		ch.NoExpTemp = true
 	}
 	av.Chart = analysisChart(ch, false)
 	av.ChartSm = analysisChart(ch, true)
@@ -330,7 +352,7 @@ func ledgerRows(days []batteryanalysis.Day, now time.Time, loc *time.Location) [
 			Set:      d.Set.In(loc).Format("15:04"),
 			Daylight: hoursMinutes(d.Daylight()),
 			Cloud:    "–", Sun: "–",
-			Suspect: d.PanelSuspect,
+			Suspect: d.PanelSuspect, Frozen: d.FrozenHours,
 		}
 		if d.HasWeather {
 			row.Cloud = fmt.Sprintf("%d%%", int(math.Round(d.CloudPct)))
@@ -373,7 +395,15 @@ func hoverJSON(c chartInput) string {
 		TZOffsets [][2]int64
 		Now       int64
 		Proj      [][4]int64
+		Cold      [][3]float64 // end of hour, °C, 1 when frozen
 	}{T0: c.From.Unix(), T1: c.axisEnd().Unix(), L: chartLeft, R: chartRight, W: chartWide, Now: c.To.Unix()}
+	for _, x := range c.Cold {
+		f := 0.0
+		if x.Frozen {
+			f = 1
+		}
+		h.Cold = append(h.Cold, [3]float64{float64(x.At.Unix()), math.Round(x.TempC*10) / 10, f})
+	}
 	for _, p := range c.Proj {
 		h.Proj = append(h.Proj, [4]int64{p.At.Unix(), int64(math.Round(p.MidMV)), int64(math.Round(p.LowMV)), int64(math.Round(p.HighMV))})
 	}

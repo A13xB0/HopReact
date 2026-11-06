@@ -34,6 +34,12 @@ const (
 	anFromDays = 35
 )
 
+// anNoTemps leaves the repeater's own temperature out of its readings.
+var anNoTemps bool
+
+// anAirTemp is the simulated air temperature; tests can make it freeze.
+var anAirTemp = func(time.Time) float64 { return 8 }
+
 var anClouds = []float64{0.9, 0.3, 0.95, 0.5, 0.97, 0.45, 0.18, 0.8, 0.99, 0.66}
 
 func anCloud(t time.Time) float64 {
@@ -64,7 +70,11 @@ func fakeScope(t *testing.T, fail *atomic.Bool) *httptest.Server {
 		v = math.Min(v, 4200)
 		if tm.Minute() == 0 {
 			temp := 9 + 4*math.Sin(float64(tm.Hour()-9)/24*2*math.Pi)
-			all = append(all, sample{Timestamp: tm.Format(time.RFC3339), BatteryMV: int(math.Round(v)), Temperature: &temp})
+			sm := sample{Timestamp: tm.Format(time.RFC3339), BatteryMV: int(math.Round(v))}
+			if !anNoTemps {
+				sm.Temperature = &temp
+			}
+			all = append(all, sm)
 		}
 	}
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -114,7 +124,7 @@ func fakeWeather(t *testing.T, calls *atomic.Int32, fail *atomic.Bool) *httptest
 			times = append(times, tm.Unix())
 			sunW = append(sunW, math.Round(s/6))
 			cloud = append(cloud, math.Round(100*anCloud(tm.Add(-time.Minute))))
-			temp = append(temp, 8)
+			temp = append(temp, anAirTemp(tm))
 		}
 		json.NewEncoder(w).Encode(map[string]any{"hourly": map[string]any{
 			"time": times, "temperature_2m": temp, "cloud_cover": cloud, "shortwave_radiation": sunW}})
@@ -319,6 +329,16 @@ func TestDumpAnalyse(t *testing.T) {
 	}
 	_, nodes := f.get(t, "/watches")
 	os.WriteFile(filepath.Join(dir, "watches.html"), []byte(nodes), 0o644)
+	if os.Getenv("HOPREACT_COLD") != "" {
+		anAirTemp = func(tm time.Time) float64 {
+			if tm.After(anNow.Add(36 * time.Hour)) {
+				return -4 + 3*math.Sin(float64(tm.Hour()-9)/24*2*math.Pi)
+			}
+			return 8
+		}
+		defer func() { anAirTemp = func(time.Time) float64 { return 8 } }()
+		f = newAnalyse(t, true)
+	}
 	for name, q := range map[string]string{"analyse.html": "", "analyse-30.html": "?days=30", "analyse-fc.html": "?days=7&forecast=1"} {
 		_, body := f.get(t, f.path(q))
 		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
@@ -440,5 +460,56 @@ func TestAnalyseWeekWithGapStillForecasts(t *testing.T) {
 	_, body := f.get(t, f.path("?days=7&forecast=1"))
 	if !strings.Contains(body, `class="ac-proj"`) || strings.Contains(body, "Not enough data to forecast") {
 		t.Fatal("the 7-day view should forecast from the longer history despite the gap")
+	}
+}
+
+func TestAnalyseColdForecast(t *testing.T) {
+	// Freezing air from tomorrow, and the repeater's own sensor runs only a
+	// few degrees above the air, so the battery freezes too.
+	anAirTemp = func(tm time.Time) float64 {
+		if tm.After(anNow.Add(12 * time.Hour)) {
+			return -6
+		}
+		return 8
+	}
+	defer func() { anAirTemp = func(time.Time) float64 { return 8 } }()
+	f := newAnalyse(t, true)
+	_, body := f.get(t, f.path("?days=7&forecast=1"))
+	for _, want := range []string{`class="ac-frozen"`, `class="ac-frozen-tick"`, `class="ac-zero"`, `class="ac-dev-exp"`,
+		"Too cold to charge (below 0 °C at the battery)", "Expected repeater temperature", "Too cold to charge at all on"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("cold forecast page is missing %q", want)
+		}
+	}
+	// Nothing is drawn left of the plot: the 30 days learned from aren't all shown.
+	wide := body[strings.Index(body, `class="ac-lg"`):strings.Index(body, `class="ac-sm"`)]
+	for _, line := range strings.Split(wide, `points="`)[1:] {
+		x, _ := strconv.ParseFloat(strings.SplitN(strings.SplitN(line, ",", 2)[0], " ", 2)[0], 64)
+		if x < chartLeft-0.5 && x > 0 {
+			t.Fatalf("a line starts at x=%.1f, left of the plot at %.0f", x, chartLeft)
+		}
+	}
+}
+
+// Without the repeater's own temperatures the page still warns of frost from
+// the air, but draws no "expected repeater temperature" line.
+func TestAnalyseColdWithoutRepeaterTemps(t *testing.T) {
+	anAirTemp = func(tm time.Time) float64 {
+		if tm.After(anNow.Add(12 * time.Hour)) {
+			return -6
+		}
+		return 8
+	}
+	defer func() { anAirTemp = func(time.Time) float64 { return 8 } }()
+	anNoTemps = true
+	defer func() { anNoTemps = false }()
+	f := newAnalyse(t, true)
+	_, body := f.get(t, f.path("?days=7&forecast=1"))
+	if !strings.Contains(body, `class="ac-proj"`) || !strings.Contains(body, `class="ac-frozen"`) ||
+		!strings.Contains(body, "from the air temperature") {
+		t.Fatal("no repeater temperatures: still forecast, still warn of frost, and say it's from the air")
+	}
+	if strings.Contains(body, `class="ac-dev-exp"`) || strings.Contains(body, "Expected repeater temperature") {
+		t.Fatal("no expected repeater temperature line without its readings")
 	}
 }

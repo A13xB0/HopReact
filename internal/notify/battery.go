@@ -147,11 +147,12 @@ func (n *Notifier) weekAhead(ctx context.Context, key string, samples []alert.Sa
 		return ""
 	}
 	learnFrom := at.Add(-7 * 24 * time.Hour)
+	var temps []corescope.TempSample
 	if n.Scope != nil {
 		// As much history as CoreScope has, so the break-even is as good as
 		// it can be. The week in the alert is the fallback.
 		if rep, err := n.Scope.Battery(wctx, key, forecastHistoryDays); err == nil && len(rep.Samples) > len(samples) {
-			samples = rep.Samples
+			samples, temps = rep.Samples, rep.Temps
 			learnFrom = at.Add(-forecastHistoryDays * 24 * time.Hour)
 			if wx, err := n.Weather.Hours(wctx, lat, lon, learnFrom.Add(-36*time.Hour), at.Add(10*24*time.Hour)); err == nil {
 				res = wx
@@ -159,7 +160,7 @@ func (n *Notifier) weekAhead(ctx context.Context, key string, samples []alert.Sa
 		}
 	}
 	r := batteryanalysis.Analyse(batteryanalysis.Input{Samples: samples, From: at.Add(-7 * 24 * time.Hour), Now: at,
-		HasPosition: true, Lat: lat, Lon: lon, Weather: res.Hours, Levels: lv, Loc: loc, FitFrom: learnFrom})
+		HasPosition: true, Lat: lat, Lon: lon, Weather: res.Hours, Levels: lv, Loc: loc, FitFrom: learnFrom, Temps: temps})
 	return r.ForecastText(loc)
 }
 
