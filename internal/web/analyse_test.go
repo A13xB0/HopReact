@@ -200,7 +200,7 @@ func TestAnalysePage(t *testing.T) {
 	for _, want := range []string{
 		"Battery analysis", "G0BAZ Washington", "Position from its advert: 54.905, -1.450",
 		`class="ph0"`, `class="ph4"`, `class="ac-sun"`, `class="ac-cloud"`, `class="ac-dev"`,
-		"Day by day", "Sun to break even", "Break-even is about", "Next 7 days", "Open-Meteo.com",
+		"Day by day", "Sun to break even", "At a glance", "Brightest day", "Average night", "Next 7 days", "Open-Meteo.com",
 		`aria-current="page">7 days`, "/static/analyse.js?v=",
 	} {
 		if !strings.Contains(body, want) {

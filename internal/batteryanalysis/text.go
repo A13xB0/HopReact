@@ -81,47 +81,51 @@ func (r Result) dullest() (Day, bool) {
 	return worst, ok
 }
 
-// Insight is one finding: a bold lead and the sentence after it.
-type Insight struct {
-	Lead, Text string
+// Fact is one figure in the "at a glance" grid: a label, the figure, and a
+// short note under it. Class colours the figure: good, bad, or none.
+type Fact struct {
+	Label, Value, Note, Class string
 }
 
-// Insights lists what the analysis found, most useful first.
-func (r Result) Insights(now time.Time, loc *time.Location, lat, lon float64) []Insight {
-	var out []Insight
+// Facts lists the figures worth a glance, most useful first. The break-even
+// only appears here while there isn't one, since the headline figures show
+// it once there is.
+func (r Result) Facts(now time.Time, loc *time.Location, lat, lon float64) []Fact {
+	var out []Fact
 	if r.Mains {
 		return out
 	}
-	switch {
-	case r.Fit != nil && r.Fit.BreakEvenKWh <= 0:
-		out = append(out, Insight{"It gains even on the dullest days here.",
-			"The panel more than covers the repeater, whatever the weather this range had."})
-	case r.Fit != nil:
-		lo, hi := math.Inf(1), math.Inf(-1)
-		for _, d := range r.Days {
-			if d.HasWeather {
-				lo, hi = math.Min(lo, d.SunKWh), math.Max(hi, d.SunKWh)
-			}
+	if r.Fit == nil && r.HasWeather && r.NoFitReason != "" {
+		note := "needs more days of readings"
+		switch r.NoFitReason {
+		case ReasonFewDays:
+			note = fmt.Sprintf("needs %d full days, has %d", minFitDays, r.FitDays)
+		case ReasonSameSun:
+			note = "needs a mix of bright and dull days"
+		case ReasonNoFollow:
+			note = "charge doesn't follow the sun"
 		}
-		text := fmt.Sprintf("Days in this range had %.1f to %.1f.", lo, hi)
-		if r.BrokeEven*2 < r.CompleteDays {
-			text += " Most fell short, so expect it to lose ground while the weather is like this."
-		}
-		out = append(out, Insight{fmt.Sprintf("Break-even is about %.2f kWh/m² of sun a day.", r.Fit.BreakEvenKWh), text})
-	case r.HasWeather && r.NoFitReason != "":
-		out = append(out, Insight{"No break-even yet.", r.NoForecastReason()})
+		out = append(out, Fact{Label: "Break-even", Value: "Not yet", Note: note})
 	}
-
-	if best, ok := r.sunniest(); ok && !r.PanelFault {
-		lead := "The panel is charging."
-		text := fmt.Sprintf("On %s it had %.2f kWh/m² of sun and gained %d mV.", dayName(best.Rise, loc), best.SunKWh, best.GainMV)
-		if worst, ok := r.dullest(); ok && worst.Rise != best.Rise {
-			text += fmt.Sprintf(" On %s, the dullest day, it gained %d mV.", dayName(worst.Rise, loc), worst.GainMV)
+	mv := func(v int) (string, string) {
+		switch {
+		case v > 0:
+			return fmt.Sprintf("+%d mV", v), "good"
+		case v < 0:
+			return fmt.Sprintf("−%d mV", -v), "bad"
 		}
-		if best.GainMV < 2*panelGainMV {
-			lead = "Charging is weak even on the brightest day."
-		}
-		out = append(out, Insight{lead, text})
+		return "0 mV", ""
+	}
+	best, okBest := r.sunniest()
+	if okBest {
+		v, c := mv(best.GainMV)
+		out = append(out, Fact{Label: "Brightest day", Value: v, Class: c,
+			Note: fmt.Sprintf("%s · %.2f kWh/m²", dayName(best.Rise, loc), best.SunKWh)})
+	}
+	if worst, ok := r.dullest(); ok && (!okBest || worst.Rise != best.Rise) {
+		v, c := mv(worst.GainMV)
+		out = append(out, Fact{Label: "Dullest day", Value: v, Class: c,
+			Note: fmt.Sprintf("%s · %.2f kWh/m²", dayName(worst.Rise, loc), worst.SunKWh)})
 	}
 
 	var nightSum, nights int
@@ -132,23 +136,24 @@ func (r Result) Insights(now time.Time, loc *time.Location, lat, lon float64) []
 		}
 	}
 	if nights > 0 {
-		text := ""
-		if n := len(r.Days); n >= 2 {
-			first, last := r.Days[0], r.Days[n-1]
-			nf, nl := first.NextRise.Sub(first.Set), last.NextRise.Sub(last.Set)
-			switch {
-			case nl > nf+5*time.Minute:
-				text = fmt.Sprintf("Nights are getting longer: %s now against %s on %s.", hm(nl), hm(nf), dayName(first.Rise, loc))
-			case nl < nf-5*time.Minute:
-				text = fmt.Sprintf("Nights are getting shorter: %s now against %s on %s.", hm(nl), hm(nf), dayName(first.Rise, loc))
-			}
-		}
-		out = append(out, Insight{fmt.Sprintf("Nights cost about %d mV.", -int(math.Round(float64(nightSum)/float64(nights)))), text})
+		v, c := mv(int(math.Round(float64(nightSum) / float64(nights))))
+		out = append(out, Fact{Label: "Average night", Value: v, Class: c, Note: "from the day's high to dawn"})
 	}
-
+	if n := len(r.Days); n >= 2 {
+		first, last := r.Days[0], r.Days[n-1]
+		nf, nl := first.NextRise.Sub(first.Set), last.NextRise.Sub(last.Set)
+		note := "about the same as " + dayName(first.Rise, loc)
+		switch {
+		case nl > nf+5*time.Minute:
+			note = fmt.Sprintf("%s longer than %s", short(nl-nf), dayName(first.Rise, loc))
+		case nl < nf-5*time.Minute:
+			note = fmt.Sprintf("%s shorter than %s", short(nf-nl), dayName(first.Rise, loc))
+		}
+		out = append(out, Fact{Label: "Tonight's dark", Value: hm(nl), Note: note})
+	}
 	if s, ok := Season(now, loc, lat, lon); ok {
-		out = append(out, Insight{fmt.Sprintf("%s day is %s,", s.Which, s.Date.Format("2 January")),
-			fmt.Sprintf("with about %s of daylight here, %s than today.", hm(s.Length), moreLess(s.Length-s.Today))})
+		out = append(out, Fact{Label: s.Which + " day", Value: s.Date.Format("2 Jan"),
+			Note: fmt.Sprintf("%s of daylight, %s", hm(s.Length), moreLess(s.Length-s.Today))})
 	}
 	return out
 }
@@ -283,6 +288,14 @@ func hm(d time.Duration) string {
 		m = -m
 	}
 	return fmt.Sprintf("%d h %02d m", m/60, m%60)
+}
+
+// short is a duration under an hour as minutes, otherwise as hm does.
+func short(d time.Duration) string {
+	if m := int(math.Round(math.Abs(d.Minutes()))); m < 60 {
+		return fmt.Sprintf("%d min", m)
+	}
+	return hm(d)
 }
 
 func moreLess(d time.Duration) string {

@@ -197,8 +197,8 @@ func TestMains(t *testing.T) {
 	if v := r.Verdict(time.UTC); v.Label != "Mains or a big battery" {
 		t.Fatalf("verdict = %+v", v)
 	}
-	if len(r.Insights(now, time.UTC, lat, lon)) != 0 {
-		t.Fatal("no insights about sunshine for a mains repeater")
+	if len(r.Facts(now, time.UTC, lat, lon)) != 0 {
+		t.Fatal("no sunshine figures for a mains repeater")
 	}
 }
 
@@ -368,5 +368,36 @@ func TestTwoHourlyReadingsFillTheLedger(t *testing.T) {
 	}
 	if wed.PanelSuspect {
 		t.Fatal("one reading at 08:40 and one at 18:41 isn't enough to call the panel dead")
+	}
+}
+
+func TestFacts(t *testing.T) {
+	r := Analyse(input(simulate(3995, time.Time{})))
+	f := r.Facts(now, time.UTC, lat, lon)
+	labels := map[string]Fact{}
+	for _, x := range f {
+		labels[x.Label] = x
+	}
+	for _, want := range []string{"Brightest day", "Dullest day", "Average night", "Tonight's dark", "Shortest day"} {
+		if _, ok := labels[want]; !ok {
+			t.Errorf("missing %q in %+v", want, f)
+		}
+	}
+	if _, ok := labels["Break-even"]; ok {
+		t.Error("break-even is in the headline figures once there is one")
+	}
+	if n := labels["Average night"]; n.Class != "bad" || !strings.HasPrefix(n.Value, "−") {
+		t.Errorf("average night = %+v", n)
+	}
+	in := input(simulate(3995, time.Time{}))
+	in.From = now.Add(-72 * time.Hour)
+	be := Fact{}
+	for _, x := range Analyse(in).Facts(now, time.UTC, lat, lon) {
+		if x.Label == "Break-even" {
+			be = x
+		}
+	}
+	if be.Value != "Not yet" || !strings.Contains(be.Note, "needs 5 full days, has") {
+		t.Errorf("no fit yet: %+v", be)
 	}
 }

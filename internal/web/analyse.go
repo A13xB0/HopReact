@@ -48,7 +48,7 @@ type analysisView struct {
 	HasTemps bool
 
 	Ledger      []ledgerRow
-	Insights    []batteryanalysis.Insight
+	Facts       []batteryanalysis.Fact
 	Forecast    template.HTML
 	ForecastTxt string
 	Weather     bool // weather lines drawn
@@ -225,7 +225,7 @@ func (s *Server) analysis(ctx context.Context, view store.WatchView, days int, f
 	av.Mains = res.Mains
 	av.Figures = figures(res, now, loc, lat, lon, av.HasPosition)
 	if av.HasPosition {
-		av.Insights = res.Insights(now, loc, lat, lon)
+		av.Facts = res.Facts(now, loc, lat, lon)
 	}
 	av.Ledger = ledgerRows(res.Days, now, loc)
 
