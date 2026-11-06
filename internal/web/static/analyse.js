@@ -2,10 +2,6 @@
 // day, the nearest reading and the weather that hour.
 (function () {
   "use strict";
-  // The forecast box reloads the page with or without the forecast.
-  var box = document.getElementById("show-forecast");
-  if (box && box.form) box.addEventListener("change", function () { box.form.submit(); });
-
   var wrap = document.getElementById("analyse-chart");
   var tip = document.getElementById("analyse-tip");
   if (!wrap || !tip) return;

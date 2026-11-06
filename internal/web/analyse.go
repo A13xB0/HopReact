@@ -63,6 +63,15 @@ type analysisView struct {
 // forecastAhead is how far the chart's forecast reaches.
 const forecastAhead = 5 * 24 * time.Hour
 
+// ToggleQuery is the link that turns the forecast on or off. A link rather
+// than a form, so it works without the page script.
+func (a *analysisView) ToggleQuery() string {
+	if a.ShowForecast {
+		return fmt.Sprintf("?days=%d", a.Days)
+	}
+	return fmt.Sprintf("?days=%d&forecast=1", a.Days)
+}
+
 // RangeQuery is the query for a range chip, keeping the forecast choice.
 func (a *analysisView) RangeQuery(days int) string {
 	q := fmt.Sprintf("?days=%d", days)

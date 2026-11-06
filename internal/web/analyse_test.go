@@ -201,7 +201,7 @@ func TestAnalysePage(t *testing.T) {
 		"Battery analysis", "G0BAZ Washington", "Position from its advert: 54.905, -1.450",
 		`class="ph0"`, `class="ph4"`, `class="ac-sun"`, `class="ac-cloud"`, `class="ac-dev"`,
 		"Day by day", "Sun to break even", "Break-even is about", "Next 7 days", "Open-Meteo.com",
-		`aria-current="page">7 days`, "/static/analyse.js",
+		`aria-current="page">7 days`, "/static/analyse.js?v=",
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("page is missing %q", want)
@@ -333,8 +333,8 @@ func TestDumpAnalyse(t *testing.T) {
 func TestAnalyseForecastToggle(t *testing.T) {
 	f := newAnalyse(t, true)
 	_, off := f.get(t, f.path(""))
-	if !strings.Contains(off, `id="show-forecast"`) || strings.Contains(off, `id="show-forecast" checked`) {
-		t.Fatal("the forecast box should be there and unticked by default")
+	if !strings.Contains(off, `id="show-forecast" href="?days=7&amp;forecast=1" role="switch" aria-checked="false"`) {
+		t.Fatal("the forecast switch should be there, off, and link to turn it on")
 	}
 	if strings.Contains(off, `class="ac-proj"`) || strings.Contains(off, `class="ac-nowline"`) {
 		t.Fatal("no forecast drawn unless asked for")
@@ -343,7 +343,7 @@ func TestAnalyseForecastToggle(t *testing.T) {
 	if code != http.StatusOK {
 		t.Fatal(code)
 	}
-	for _, want := range []string{`id="show-forecast" checked`, `class="ac-proj"`, `class="ac-band"`,
+	for _, want := range []string{`id="show-forecast" href="?days=7" role="switch" aria-checked="true"`, `class="ac-proj"`, `class="ac-band"`,
 		`class="ac-nowline"`, "Forecast voltage", `href="?days=14&amp;forecast=1"`} {
 		if !strings.Contains(on, want) {
 			t.Errorf("forecast page is missing %q", want)

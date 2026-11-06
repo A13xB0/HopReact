@@ -44,8 +44,12 @@
 .ac .ac-band{fill:#5aa9ff;opacity:.18}
 .ac .ac-nowline{stroke:var(--muted);stroke-width:1}
 .ac .ac-nowlabel{fill:var(--text)}
-.fc-toggle{margin:0;font-size:.85rem;color:var(--muted)}
-.fc-toggle label{display:inline-flex;gap:.4rem;align-items:center;cursor:pointer}
+.fc-toggle{display:inline-flex;gap:.45rem;align-items:center;font-size:.85rem;color:var(--muted);text-decoration:none}
+.fc-toggle:hover{color:var(--text)}
+.fc-toggle .box{width:15px;height:15px;border:1.5px solid var(--muted);border-radius:4px;display:inline-grid;place-items:center;flex:none}
+.fc-toggle[aria-checked=true]{color:var(--text)}
+.fc-toggle[aria-checked=true] .box{background:var(--accent);border-color:var(--accent)}
+.fc-toggle[aria-checked=true] .box::after{content:"";width:4px;height:8px;border:solid #fff;border-width:0 2px 2px 0;transform:translateY(-1px) rotate(45deg)}
 .legend i.lg-proj{background:rgba(90,169,255,.25);border-color:var(--text);border-style:dashed}
 .ac .fc-up{fill:var(--good);opacity:.85}.ac .fc-down{fill:var(--bad);opacity:.85}
 .legend{display:flex;flex-wrap:wrap;gap:.35rem .9rem;font-size:.75rem;color:var(--muted);margin-top:.5rem}
@@ -104,11 +108,7 @@
   <div class="row spread">
     <h3 style="margin:0">Voltage{{if $a.HasPosition}}, daylight{{end}}{{if $a.Weather}} and weather{{end}}</h3>
     {{if $a.CanForecast}}
-    <form method="get" class="fc-toggle" id="forecast-form">
-      <input type="hidden" name="days" value="{{$a.Days}}">
-      <label><input type="checkbox" name="forecast" value="1" id="show-forecast"{{if $a.ShowForecast}} checked{{end}}> Show the next 5 days</label>
-      <noscript><button class="secondary" type="submit">Update</button></noscript>
-    </form>
+    <a class="fc-toggle" id="show-forecast" href="{{$a.ToggleQuery}}" role="switch" aria-checked="{{if $a.ShowForecast}}true{{else}}false{{end}}"><span class="box" aria-hidden="true"></span>Show the next 5 days</a>
     {{else if $a.HasPosition}}<span class="small">Shading shows night, the three twilights and day</span>{{end}}
   </div>
   <div class="chart-wrap" id="analyse-chart" data-hover="{{$a.HoverRaw}}">
@@ -177,5 +177,5 @@
 {{end}}
 
 {{if $a.Weather}}<p class="small">Weather data by <a href="https://open-meteo.com/" target="_blank" rel="noopener">Open-Meteo.com</a> (CC BY 4.0), for the area around the repeater rather than its exact site. Sun times are worked out from its position. Forecasts are estimates.</p>{{end}}
-<script src="/static/analyse.js" defer></script>
+<script src="/static/analyse.js?v={{.Version}}" defer></script>
 {{end}}
