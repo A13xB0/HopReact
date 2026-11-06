@@ -227,8 +227,8 @@ func TestAnalyseRangeAndCache(t *testing.T) {
 	if code != http.StatusOK || !strings.Contains(body, `aria-current="page">30 days`) {
 		t.Fatalf("30 days: status %d", code)
 	}
-	if n := f.wxCalls.Load(); n != 2 {
-		t.Fatalf("weather fetched %d times; a longer range needs one more fetch", n)
+	if n := f.wxCalls.Load(); n != 1 {
+		t.Fatalf("weather fetched %d times; every range learns from 30 days, so one fetch covers them all", n)
 	}
 	// Anything not offered falls back to a week.
 	if _, body := f.get(t, f.path("?days=9999")); !strings.Contains(body, `aria-current="page">7 days`) {
@@ -407,4 +407,38 @@ func fakeScopeFrom(t *testing.T, cut time.Time) *httptest.Server {
 	}))
 	t.Cleanup(srv.Close)
 	return srv
+}
+
+// A week with a gap in it has too few full days on its own, but the 7-day
+// view learns from 30 days and still forecasts.
+func TestAnalyseWeekWithGapStillForecasts(t *testing.T) {
+	f := newAnalyse(t, true)
+	inner := fakeScope(t, nil)
+	t.Cleanup(inner.Close)
+	gapFrom, gapTo := anNow.Add(-5*24*time.Hour), anNow.Add(-2*24*time.Hour)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resp, err := http.Get(inner.URL + r.URL.String())
+		if err != nil {
+			http.Error(w, err.Error(), 500)
+			return
+		}
+		defer resp.Body.Close()
+		var body map[string]any
+		json.NewDecoder(resp.Body).Decode(&body)
+		var keep []any
+		for _, x := range body["samples"].([]any) {
+			at, _ := time.Parse(time.RFC3339, x.(map[string]any)["timestamp"].(string))
+			if at.Before(gapFrom) || at.After(gapTo) {
+				keep = append(keep, x)
+			}
+		}
+		body["samples"] = keep
+		json.NewEncoder(w).Encode(body)
+	}))
+	t.Cleanup(srv.Close)
+	f.srv.Scope = corescope.NewClient(srv.URL, 5*time.Second, nil)
+	_, body := f.get(t, f.path("?days=7&forecast=1"))
+	if !strings.Contains(body, `class="ac-proj"`) || strings.Contains(body, "Not enough data to forecast") {
+		t.Fatal("the 7-day view should forecast from the longer history despite the gap")
+	}
 }

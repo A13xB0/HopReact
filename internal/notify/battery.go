@@ -101,7 +101,7 @@ func (n *Notifier) batterySection(ctx context.Context, userID int64, items []pol
 					files = append(files, discord.File{Name: name, ContentType: "image/png", Data: png})
 					e := n.batteryEmbed(it, tr, lv, at, loc, name)
 					if hasPos && (lvl == "low" || lvl == "critical") {
-						if txt := n.weekAhead(ctx, samples, lv, at, loc, lat, lon); txt != "" {
+						if txt := n.weekAhead(ctx, it.TargetKey, samples, lv, at, loc, lat, lon); txt != "" {
 							e.Fields = append(e.Fields, discord.EmbedField{Name: "Next 7 days", Value: txt})
 						}
 					}
@@ -119,6 +119,9 @@ func (n *Notifier) batterySection(ctx context.Context, userID int64, items []pol
 	return b.String(), embeds, files
 }
 
+// forecastHistoryDays is how far back an alert's forecast learns from.
+const forecastHistoryDays = 30
+
 // position is where a repeater says it is, if it says.
 func (n *Notifier) position(ctx context.Context, key string) (float64, float64, bool) {
 	t, err := n.Store.Target(ctx, string(corescope.KindNode), key)
@@ -131,7 +134,7 @@ func (n *Notifier) position(ctx context.Context, key string) (float64, float64, 
 
 // weekAhead is the forecast sentence for an alert, or "" when there's no
 // weather or not enough history for a break-even yet.
-func (n *Notifier) weekAhead(ctx context.Context, samples []alert.Sample, lv alert.BatteryLevels,
+func (n *Notifier) weekAhead(ctx context.Context, key string, samples []alert.Sample, lv alert.BatteryLevels,
 	at time.Time, loc *time.Location, lat, lon float64) string {
 	if n.Weather == nil {
 		return ""
@@ -143,8 +146,20 @@ func (n *Notifier) weekAhead(ctx context.Context, samples []alert.Sample, lv ale
 		n.Log.Warn("no weather for battery alert", "err", err)
 		return ""
 	}
+	learnFrom := at.Add(-7 * 24 * time.Hour)
+	if n.Scope != nil {
+		// As much history as CoreScope has, so the break-even is as good as
+		// it can be. The week in the alert is the fallback.
+		if rep, err := n.Scope.Battery(wctx, key, forecastHistoryDays); err == nil && len(rep.Samples) > len(samples) {
+			samples = rep.Samples
+			learnFrom = at.Add(-forecastHistoryDays * 24 * time.Hour)
+			if wx, err := n.Weather.Hours(wctx, lat, lon, learnFrom.Add(-36*time.Hour), at.Add(10*24*time.Hour)); err == nil {
+				res = wx
+			}
+		}
+	}
 	r := batteryanalysis.Analyse(batteryanalysis.Input{Samples: samples, From: at.Add(-7 * 24 * time.Hour), Now: at,
-		HasPosition: true, Lat: lat, Lon: lon, Weather: res.Hours, Levels: lv, Loc: loc})
+		HasPosition: true, Lat: lat, Lon: lon, Weather: res.Hours, Levels: lv, Loc: loc, FitFrom: learnFrom})
 	return r.ForecastText(loc)
 }
 

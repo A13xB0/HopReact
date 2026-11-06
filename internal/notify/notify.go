@@ -19,6 +19,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"hopreact/internal/corescope"
 	"hopreact/internal/discord"
 	"hopreact/internal/poller"
 	"hopreact/internal/store"
@@ -51,6 +52,9 @@ type Notifier struct {
 	// Weather adds the coming week's forecast to low and critical alerts.
 	// Nil leaves it out.
 	Weather *weather.Service
+	// Scope, when set, gives that forecast a longer history to learn from
+	// than the week an alert carries.
+	Scope *corescope.Client
 }
 
 // DrainOnce sends everything currently due.

@@ -165,7 +165,12 @@ type Result struct {
 
 	LatestMV int
 	LatestAt time.Time
+	// age is how old the latest reading was at Now.
+	age time.Duration
 }
+
+// maxStartAge is the oldest a reading can be to start a forecast from.
+const maxStartAge = 24 * time.Hour
 
 // Analyse works through the readings.
 func Analyse(in Input) Result {
@@ -173,6 +178,7 @@ func Analyse(in Input) Result {
 	samples := within(in.Samples, in.From, in.Now)
 	if n := len(samples); n > 0 {
 		r.LatestMV, r.LatestAt = samples[n-1].MV, samples[n-1].At
+		r.age = in.Now.Sub(r.LatestAt)
 	}
 	r.Mains = looksMains(samples, in.Now)
 	r.HasNet, r.NetMV, r.NetSpan = netChange(samples)
@@ -202,10 +208,16 @@ func Analyse(in Input) Result {
 		r.HasWeather = r.HasWeather || d.HasWeather
 	}
 	r.PanelFault, r.PanelDay = panelFault(r.Days)
+	r.Fit, r.NoFitReason = fit(allDays)
+	// A few flat days near full can look like mains, but a battery whose
+	// charge follows the sunshine over the longer history is solar.
+	if r.Mains && r.Fit != nil {
+		r.Mains = false
+	}
 	if r.Mains {
+		r.Fit, r.NoFitReason = nil, ""
 		return r
 	}
-	r.Fit, r.NoFitReason = fit(allDays)
 	if r.Fit != nil {
 		for _, d := range r.Days {
 			if d.HasNet && d.HasWeather {
@@ -442,8 +454,13 @@ func median(v []float64) float64 {
 // forecast projects the morning lows ahead from the latest known one, using
 // the weather forecast and the break-even line.
 func forecast(r *Result, s []alert.Sample, in Input) {
-	// Start from the newest morning low no more than a day and a half old,
-	// or failing that the latest reading.
+	// Nothing heard for a day: whatever is happening now is unknown.
+	if r.age > maxStartAge {
+		return
+	}
+	// Start from the newest morning low no more than two days old, or
+	// failing that a reading from the last day. Readings often arrive hours
+	// apart, so anything tighter leaves good repeaters without a forecast.
 	var start time.Time
 	var mv float64
 	for _, d := range r.Days {
@@ -454,8 +471,8 @@ func forecast(r *Result, s []alert.Sample, in Input) {
 			start, mv = d.NextRise, float64(d.NextLowMV)
 		}
 	}
-	if start.IsZero() || in.Now.Sub(start) > 36*time.Hour {
-		if len(s) == 0 || in.Now.Sub(s[len(s)-1].At) > 6*time.Hour {
+	if start.IsZero() || in.Now.Sub(start) > 48*time.Hour {
+		if len(s) == 0 || in.Now.Sub(s[len(s)-1].At) > maxStartAge {
 			return
 		}
 		start, mv = s[len(s)-1].At, float64(s[len(s)-1].MV)
@@ -508,7 +525,7 @@ type ProjPoint struct {
 // day/night shape a solar battery really has. Nil without a fit, or when
 // the latest reading is too old to start from.
 func (r Result) Project(hours []weather.Hour, until time.Time) []ProjPoint {
-	if r.Fit == nil || r.Mains || r.LatestAt.IsZero() {
+	if r.Fit == nil || r.Mains || r.LatestAt.IsZero() || r.age > maxStartAge {
 		return nil
 	}
 	start, v := r.LatestAt, float64(r.LatestMV)

@@ -217,7 +217,10 @@ func (r Result) NoForecastReason() string {
 	case r.NoFitReason == ReasonNoFollow:
 		return "Its charge doesn't follow the sunshine, which usually means a full or very big battery, mains power, or a panel that isn't charging."
 	case r.Fit != nil:
-		return "The newest reading is too old to start a forecast from, or the weather forecast doesn't reach far enough ahead."
+		if r.age > maxStartAge {
+			return "The newest reading is more than a day old, so there's nothing current to start a forecast from."
+		}
+		return "The weather forecast doesn't reach far enough ahead yet."
 	}
 	return "There isn't enough data yet."
 }

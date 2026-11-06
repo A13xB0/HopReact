@@ -62,9 +62,10 @@ type analysisView struct {
 	NoForecast string
 }
 
-// fitWindow is the least history the break-even learns from, whatever range
-// is shown, so the 3-day view can still forecast.
-const fitWindow = 14
+// fitWindow is how much history the break-even always learns from, whatever
+// range is shown: the longest range, so every view forecasts from as much
+// data as there is.
+const fitWindow = 30
 
 // forecastAhead is how far the chart's forecast reaches.
 const forecastAhead = 5 * 24 * time.Hour

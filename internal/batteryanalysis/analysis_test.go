@@ -298,3 +298,40 @@ func TestProjectNeedsAFit(t *testing.T) {
 		t.Fatal("no fit, no projection")
 	}
 }
+
+// A solar battery near full through a few dull days barely moves, which on
+// its own looks like mains. Its history says otherwise.
+func TestNearFullDullDaysAreNotMains(t *testing.T) {
+	in := input(simulate(3995, time.Time{}))
+	// The last three days flat at 4.12 V, as a full-ish cell in fog.
+	for i := range in.Samples {
+		if now.Sub(in.Samples[i].At) <= 72*time.Hour {
+			in.Samples[i].MV = 4120 + (i%3)*5
+		}
+	}
+	in.FitFrom = start
+	in.From = now.Add(-72 * time.Hour)
+	r := Analyse(in)
+	if r.Mains {
+		t.Fatal("a battery whose charge follows the sun isn't mains")
+	}
+	if r.Fit == nil {
+		t.Fatalf("no fit: %s", r.NoFitReason)
+	}
+}
+
+func TestForecastStartsFromAnHoursOldReading(t *testing.T) {
+	s := simulate(3995, time.Time{})
+	in := input(s)
+	// Nothing in the last 9 hours, and no morning low since yesterday.
+	in.Now = now.Add(9 * time.Hour)
+	r := Analyse(in)
+	if len(r.Forecast) == 0 || r.Project(s.hours, in.Now.Add(48*time.Hour)) == nil {
+		t.Fatalf("a reading 9 hours old is still a fine start: %q", r.NoForecastReason())
+	}
+	in.Now = now.Add(30 * time.Hour)
+	r = Analyse(in)
+	if r.Project(s.hours, in.Now.Add(48*time.Hour)) != nil || !strings.Contains(r.NoForecastReason(), "more than a day old") {
+		t.Fatalf("a day-old reading is too old: %q", r.NoForecastReason())
+	}
+}

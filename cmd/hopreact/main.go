@@ -151,7 +151,7 @@ func main() {
 		},
 	}
 	nt := &notify.Notifier{Store: st, Sender: dc, Log: log, BaseURL: cfg.Site.BaseURL, Now: time.Now,
-		ScopeURL: cfg.CoreScope.APIURL, Loc: cfg.Battery.Location(), Weather: wx}
+		ScopeURL: cfg.CoreScope.APIURL, Loc: cfg.Battery.Location(), Weather: wx, Scope: scope}
 
 	pollTicker := time.NewTicker(cfg.Poll.Interval)
 	defer pollTicker.Stop()
