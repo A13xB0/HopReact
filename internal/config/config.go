@@ -14,6 +14,7 @@ package config
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -268,6 +269,13 @@ type BatteryConfig struct {
 	// Timezone decides where one day ends when finding each night's lowest
 	// reading, and the days named in messages ("critical by Sunday").
 	Timezone string `yaml:"timezone"`
+	// Weather adds sunshine, cloud and temperature from Open-Meteo to the
+	// battery analysis page, and the week's forecast to low and critical
+	// alerts. Positions are rounded to 0.1° before they are sent. Sunrise,
+	// sunset and twilight are worked out locally and need no switch.
+	Weather bool `yaml:"weather"`
+	// WeatherURL is Open-Meteo's address, changeable for a self-hosted copy.
+	WeatherURL string `yaml:"weather_url"`
 }
 
 // Location is the battery timezone, falling back to UTC if it can't be
@@ -340,6 +348,7 @@ func Default() Config {
 			RecoverMarginMV: 100,
 			OverchargeMV:    4250,
 			Timezone:        "Europe/London",
+			WeatherURL:      "https://api.open-meteo.com",
 		},
 	}
 }
@@ -498,6 +507,11 @@ func (b BatteryConfig) validate() error {
 	}
 	if b.CheckEvery < MinPollInterval {
 		return fmt.Errorf("battery.check_every must be at least %s, got %s", MinPollInterval, b.CheckEvery)
+	}
+	if b.Weather {
+		if u, err := url.Parse(b.WeatherURL); err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" {
+			return fmt.Errorf("battery.weather_url must be an http(s) URL, got %q", b.WeatherURL)
+		}
 	}
 	if b.ConfirmReadings < 1 {
 		return fmt.Errorf("battery.confirm_readings must be at least 1, got %d", b.ConfirmReadings)

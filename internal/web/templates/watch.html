@@ -110,6 +110,7 @@
   {{end}}
 
   <div class="row" style="margin-top:.8rem">
+    {{if or .HasReading .Silent}}<a class="btn" href="/watches/{{$w.Watch.ID}}/battery/analyse">Analyse battery</a>{{end}}
     {{if .HasReading}}<a href="{{.ScopeURL}}" target="_blank" rel="noopener">Full chart on CoreScope</a>{{end}}
     <form method="post" action="/watches/{{$w.Watch.ID}}/battery" style="margin:0">
       <input type="hidden" name="csrf_token" value="{{$.CSRF}}">

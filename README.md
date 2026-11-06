@@ -105,7 +105,17 @@ reports its own status or an observer polls it.
 - **A trend, not a guess.** Each night's lowest reading is compared over the
   last week, which takes out the day/night swing of solar repeaters. The
   watch page and the alerts say whether it is draining, charging or holding,
-  and roughly how long until the next level. Alerts carry a chart.
+  and roughly how long until the next level. Alerts carry a chart, shaded for
+  night, twilight and day when the repeater shares its position.
+- **Analyse battery.** Each repeater's page links to a breakdown over 3 to 30
+  days: voltage against night, the three twilights and day, worked out from
+  the position in its advert, and a day-by-day table of what each day gained
+  and each night cost. With `battery.weather` on, it adds sunshine, cloud and
+  temperature from [Open-Meteo](https://open-meteo.com/), works out how much
+  sun the repeater needs to break even, flags a panel that has stopped
+  charging on bright days, and projects the coming week from the forecast.
+  Low and critical alerts carry that projection too. Positions are rounded to
+  0.1° before anything is sent.
 
 ## Status
 

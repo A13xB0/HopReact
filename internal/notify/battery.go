@@ -1,18 +1,22 @@
 package notify
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/url"
 	"sort"
 	"strings"
 	"time"
 
 	"hopreact/internal/alert"
+	"hopreact/internal/batteryanalysis"
 	"hopreact/internal/batteryview"
 	"hopreact/internal/corescope"
 	"hopreact/internal/discord"
 	"hopreact/internal/poller"
+	"hopreact/internal/sun"
 )
 
 // maxBatteryCharts is how many battery cards with a chart one message
@@ -40,7 +44,7 @@ var batteryHeadings = map[string][2]string{
 // batterySection renders battery alerts: a heading per kind of change, a
 // card with a chart for each of the first few alerts, and text lines for the
 // rest and for anything whose chart could not be drawn.
-func (n *Notifier) batterySection(items []poller.BatteryPayload, now time.Time) (string, []discord.Embed, []discord.File) {
+func (n *Notifier) batterySection(ctx context.Context, userID int64, items []poller.BatteryPayload, now time.Time) (string, []discord.Embed, []discord.File) {
 	sort.SliceStable(items, func(i, j int) bool {
 		if batteryOrder[items[i].Level] != batteryOrder[items[j].Level] {
 			return batteryOrder[items[i].Level] < batteryOrder[items[j].Level]
@@ -85,11 +89,26 @@ func (n *Notifier) batterySection(items []poller.BatteryPayload, now time.Time) 
 			tr := alert.AnalyseTrend(samples, at, loc)
 			lv := alert.BatteryLevels{LowMV: it.LowMV, CriticalMV: it.CriticalMV, OverchargeMV: it.OverchargeMV}
 			if lvl != "recovered" && len(embeds) < maxBatteryCharts {
-				png, err := BatteryChart(ChartInput{Name: it.TargetName, Samples: samples, Now: at, Trend: tr, Levels: lv, Loc: loc})
+				lat, lon, hasPos := n.position(ctx, it.TargetKey)
+				var spans []sun.Span
+				if hasPos {
+					// The chart runs from a week back to at most 8 days ahead.
+					spans = sun.Spans(at.Add(-7*24*time.Hour), at.Add(8*24*time.Hour), lat, lon)
+				}
+				png, err := BatteryChart(ChartInput{Name: it.TargetName, Samples: samples, Now: at, Trend: tr, Levels: lv, Loc: loc, Spans: spans})
 				if err == nil {
 					name := fmt.Sprintf("battery-%d.png", len(files)+1)
 					files = append(files, discord.File{Name: name, ContentType: "image/png", Data: png})
-					embeds = append(embeds, n.batteryEmbed(it, tr, lv, at, loc, name))
+					e := n.batteryEmbed(it, tr, lv, at, loc, name)
+					if hasPos && (lvl == "low" || lvl == "critical") {
+						if txt := n.weekAhead(ctx, samples, lv, at, loc, lat, lon); txt != "" {
+							e.Fields = append(e.Fields, discord.EmbedField{Name: "Next 7 days", Value: txt})
+						}
+					}
+					if link := n.analyseLink(ctx, userID, it.TargetKey); link != "" {
+						e.Fields = append(e.Fields, discord.EmbedField{Name: "More", Value: "[Analyse battery](" + link + ")"})
+					}
+					embeds = append(embeds, e)
 					continue
 				}
 				n.Log.Warn("battery chart not drawn, sending text", "target", it.TargetKey, "err", err)
@@ -98,6 +117,48 @@ func (n *Notifier) batterySection(items []poller.BatteryPayload, now time.Time) 
 		}
 	}
 	return b.String(), embeds, files
+}
+
+// position is where a repeater says it is, if it says.
+func (n *Notifier) position(ctx context.Context, key string) (float64, float64, bool) {
+	t, err := n.Store.Target(ctx, string(corescope.KindNode), key)
+	if err != nil || t.Lat == nil || t.Lon == nil || (*t.Lat == 0 && *t.Lon == 0) ||
+		math.Abs(*t.Lat) > 90 || math.Abs(*t.Lon) > 180 {
+		return 0, 0, false
+	}
+	return *t.Lat, *t.Lon, true
+}
+
+// weekAhead is the forecast sentence for an alert, or "" when there's no
+// weather or not enough history for a break-even yet.
+func (n *Notifier) weekAhead(ctx context.Context, samples []alert.Sample, lv alert.BatteryLevels,
+	at time.Time, loc *time.Location, lat, lon float64) string {
+	if n.Weather == nil {
+		return ""
+	}
+	wctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	res, err := n.Weather.Hours(wctx, lat, lon, at.Add(-9*24*time.Hour), at.Add(10*24*time.Hour))
+	if err != nil {
+		n.Log.Warn("no weather for battery alert", "err", err)
+		return ""
+	}
+	r := batteryanalysis.Analyse(batteryanalysis.Input{Samples: samples, From: at.Add(-7 * 24 * time.Hour), Now: at,
+		HasPosition: true, Lat: lat, Lon: lon, Weather: res.Hours, Levels: lv, Loc: loc})
+	return r.ForecastText(loc)
+}
+
+// analyseLink is the person's Analyse battery page for a repeater, if they
+// still watch it.
+func (n *Notifier) analyseLink(ctx context.Context, userID int64, key string) string {
+	if n.BaseURL == "" {
+		return ""
+	}
+	id, ok, err := n.Store.WatchIDFor(ctx, userID, string(corescope.KindNode), key)
+	if err != nil || !ok {
+		return ""
+	}
+	return fmt.Sprintf("%s/watches/%d/battery/analyse", strings.TrimRight(n.BaseURL, "/"), id)
 }
 
 // batteryLine is one alert as text, for alerts without a card.

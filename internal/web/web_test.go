@@ -54,7 +54,7 @@ func signIn(t *testing.T, srv *Server, st *store.Store) (*http.Cookie, string, s
 	token, _ := randomToken()
 	csrf, _ := randomToken()
 	sum := sha256.Sum256([]byte(token))
-	if err := st.CreateSession(ctx, sum[:], u.ID, csrf, t0.Add(time.Hour)); err != nil {
+	if err := st.CreateSession(ctx, sum[:], u.ID, csrf, st.Now().Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 	return &http.Cookie{Name: srv.sessionCookieName(), Value: token}, csrf, u

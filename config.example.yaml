@@ -126,6 +126,13 @@ battery:
   # Where one day ends when finding each night's lowest reading for the
   # trend, and the days named in messages.
   timezone: Europe/London
+  # Sunshine, cloud and temperature from Open-Meteo (free, no key, CC BY 4.0)
+  # on each repeater's "Analyse battery" page, and the week's forecast in low
+  # and critical alerts. Positions are rounded to 0.1 degrees (about 7 km)
+  # before they are sent. Sunrise, sunset and twilight need no switch: they
+  # are worked out here from the repeater's advertised position.
+  weather: false
+  weather_url: https://api.open-meteo.com
 
 # A public status board at /status. Off by default — publishing your mesh
 # should be a decision, not a surprise.

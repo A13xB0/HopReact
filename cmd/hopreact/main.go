@@ -30,6 +30,7 @@ import (
 	"hopreact/internal/notify"
 	"hopreact/internal/poller"
 	"hopreact/internal/store"
+	"hopreact/internal/weather"
 	"hopreact/internal/web"
 )
 
@@ -109,6 +110,13 @@ func main() {
 	}
 
 	srv.Region = region
+	srv.Scope = scope
+	var wx *weather.Service
+	if cfg.Battery.Enabled && cfg.Battery.Weather {
+		wx = &weather.Service{Client: &weather.Client{BaseURL: cfg.Battery.WeatherURL,
+			HTTP: &http.Client{Timeout: 10 * time.Second}}, Cache: st, Now: time.Now}
+		srv.Weather = wx
+	}
 
 	// The services the mesh depends on but that HopReact cannot infer from
 	// packets. Probed on a timer and cached, so the public board never turns
@@ -143,7 +151,7 @@ func main() {
 		},
 	}
 	nt := &notify.Notifier{Store: st, Sender: dc, Log: log, BaseURL: cfg.Site.BaseURL, Now: time.Now,
-		ScopeURL: cfg.CoreScope.APIURL, Loc: cfg.Battery.Location()}
+		ScopeURL: cfg.CoreScope.APIURL, Loc: cfg.Battery.Location(), Weather: wx}
 
 	pollTicker := time.NewTicker(cfg.Poll.Interval)
 	defer pollTicker.Stop()

@@ -33,6 +33,7 @@ import (
 	"hopreact/internal/health"
 	"hopreact/internal/poller"
 	"hopreact/internal/store"
+	"hopreact/internal/weather"
 )
 
 //go:embed templates/*.html
@@ -65,6 +66,10 @@ type Server struct {
 	// Health probes the services the board reports on. Nil is fine — the
 	// section is simply omitted.
 	Health *health.Monitor
+	// Scope fetches battery history for the analysis page, and Weather the
+	// weather to go with it. Either can be nil.
+	Scope   *corescope.Client
+	Weather *weather.Service
 
 	// One template set PER PAGE, not one for everything. Each page file
 	// defines its own {{define "content"}}, and parsing them all into a
@@ -102,7 +107,7 @@ func New(st *store.Store, dc *discord.Client, cfg config.Config, log *slog.Logge
 		"voltsField": voltsField,
 	}
 	pages := map[string]*template.Template{}
-	for _, page := range []string{"index.html", "watches.html", "search.html", "watch.html", "status.html"} {
+	for _, page := range []string{"index.html", "watches.html", "search.html", "watch.html", "status.html", "analyse.html"} {
 		t, err := template.New(page).Funcs(funcs).
 			ParseFS(templateFS, "templates/layout.html", "templates/"+page)
 		if err != nil {
@@ -151,6 +156,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /account/test-dm", s.handleTestDM)
 	mux.HandleFunc("POST /account/delete", s.handleDeleteAccount)
 	mux.HandleFunc("POST /watches/{id}/battery", s.handleBattery)
+	mux.HandleFunc("GET /watches/{id}/battery/analyse", s.handleAnalyse)
 	mux.HandleFunc("POST /account/battery", s.handleAutoBattery)
 	mux.HandleFunc("POST /account/battery-banner", s.handleBatteryBanner)
 
@@ -297,6 +303,7 @@ type pageData struct {
 	// is the one on a watch page.
 	Battery     map[int64]*batteryCard
 	BatteryCard *batteryCard
+	Analysis    *analysisView
 }
 
 // typeGroup is a one-click preset in the rule editor. Groups are expanded to

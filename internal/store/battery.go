@@ -355,3 +355,16 @@ func nullMV(mv int) any {
 	}
 	return mv
 }
+
+// WatchIDFor finds one person's watch on a target, for linking alerts back
+// to its page.
+func (s *Store) WatchIDFor(ctx context.Context, userID int64, kind, key string) (int64, bool, error) {
+	var id int64
+	err := s.read.QueryRowContext(ctx, `
+		SELECT id FROM watches WHERE user_id = ? AND target_kind = ? AND target_key = ? ORDER BY id LIMIT 1`,
+		userID, kind, strings.ToLower(key)).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, false, nil
+	}
+	return id, err == nil, err
+}

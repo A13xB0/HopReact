@@ -59,6 +59,12 @@ func UnpackSamples(p [][2]int64) []BatterySample {
 	return out
 }
 
+// TempSample is the repeater's own temperature, sent with some readings.
+type TempSample struct {
+	At time.Time
+	C  float64
+}
+
 // BatteryReport is what CoreScope knows about one node's battery.
 type BatteryReport struct {
 	Status   BatteryStatus
@@ -75,6 +81,8 @@ type BatteryReport struct {
 	// first, one per timestamp. Different stations read the same battery, so
 	// they belong on one line.
 	Samples []BatterySample
+	// Temps are the readings that carried a temperature, oldest first.
+	Temps []TempSample
 }
 
 type batteryJSON struct {
@@ -91,8 +99,9 @@ type batteryJSON struct {
 		CriticalMV int `json:"critical_mv"`
 	} `json:"thresholds"`
 	Samples []struct {
-		Timestamp *string `json:"timestamp"`
-		BatteryMV int     `json:"battery_mv"`
+		Timestamp   *string  `json:"timestamp"`
+		BatteryMV   int      `json:"battery_mv"`
+		Temperature *float64 `json:"temperature_c"`
 	} `json:"samples"`
 }
 
@@ -139,8 +148,14 @@ func (raw batteryJSON) report() BatteryReport {
 		r.Reporter = raw.Selected.ObserverName
 	}
 	seen := map[int64]bool{}
+	seenTemp := map[int64]bool{}
 	for _, s := range raw.Samples {
 		at := parseTime(s.Timestamp)
+		// A board's sensor reads well outside this only when it is broken.
+		if !at.IsZero() && s.Temperature != nil && *s.Temperature > -40 && *s.Temperature < 85 && !seenTemp[at.Unix()] {
+			seenTemp[at.Unix()] = true
+			r.Temps = append(r.Temps, TempSample{At: at, C: *s.Temperature})
+		}
 		// 0 mV means no battery fitted, and a reading without a time cannot
 		// be placed on a trend.
 		if at.IsZero() || s.BatteryMV <= 0 || seen[at.Unix()] {
@@ -150,5 +165,6 @@ func (raw batteryJSON) report() BatteryReport {
 		r.Samples = append(r.Samples, BatterySample{At: at, MV: s.BatteryMV})
 	}
 	sort.Slice(r.Samples, func(i, j int) bool { return r.Samples[i].At.Before(r.Samples[j].At) })
+	sort.Slice(r.Temps, func(i, j int) bool { return r.Temps[i].At.Before(r.Temps[j].At) })
 	return r
 }

@@ -22,6 +22,7 @@ import (
 	"hopreact/internal/discord"
 	"hopreact/internal/poller"
 	"hopreact/internal/store"
+	"hopreact/internal/weather"
 )
 
 // maxAttempts is how many times a message is retried before being
@@ -47,6 +48,9 @@ type Notifier struct {
 	// Loc names the days in battery messages and ends each day for the
 	// trend. Nil means UTC.
 	Loc *time.Location
+	// Weather adds the coming week's forecast to low and critical alerts.
+	// Nil leaves it out.
+	Weather *weather.Service
 }
 
 // DrainOnce sends everything currently due.
@@ -75,7 +79,7 @@ func (n *Notifier) DrainOnce(ctx context.Context, limit int) (sent int, err erro
 
 	for _, userID := range order {
 		group := byUser[userID]
-		msg := n.compose(group)
+		msg := n.compose(ctx, userID, group)
 		discordID := group[0].DiscordID
 
 		sendErr := n.Sender.Send(ctx, discordID, msg)
@@ -145,7 +149,7 @@ func (n *Notifier) Run(ctx context.Context, tick <-chan time.Time) {
 // compose turns one user's queued notifications into a single Discord
 // message: quiet-node alerts first, then battery alerts with their charts,
 // then any "battery alerts are now on" notice, and the link once at the end.
-func (n *Notifier) compose(group []store.Notification) discord.Message {
+func (n *Notifier) compose(ctx context.Context, userID int64, group []store.Notification) discord.Message {
 	var quiet []store.Notification
 	var batteries []poller.BatteryPayload
 	var enabled []poller.BatteryEnabledPayload
@@ -171,7 +175,7 @@ func (n *Notifier) compose(group []store.Notification) discord.Message {
 		}
 	}
 	if len(batteries) > 0 {
-		t, embeds, files := n.batterySection(batteries, n.now())
+		t, embeds, files := n.batterySection(ctx, userID, batteries, n.now())
 		if t != "" {
 			parts = append(parts, strings.TrimRight(t, "\n"))
 		}

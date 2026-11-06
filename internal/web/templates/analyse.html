@@ -1,0 +1,167 @@
+{{define "content"}}
+{{$a := .Analysis}}
+<style>
+.an-head{display:flex;flex-wrap:wrap;gap:.6rem 1rem;align-items:flex-end;justify-content:space-between}
+.an-head h2{margin:0}
+.ranges{display:flex;gap:.35rem;flex-wrap:wrap}
+.ranges a{font-size:.8rem;padding:.2rem .65rem;border-radius:999px;border:1px solid var(--border);
+  color:var(--muted);text-decoration:none}
+.ranges a[aria-current=page]{background:var(--accent);border-color:var(--accent);color:#fff}
+.notice{font-size:.85rem;color:var(--muted);border-left:3px solid var(--warn);padding:.15rem 0 .15rem .7rem;margin:.4rem 0 0}
+.figs{display:grid;grid-template-columns:repeat(auto-fit,minmax(9rem,1fr));gap:.8rem;margin-top:.9rem}
+.figs b{display:block;font-size:1.15rem;font-variant-numeric:tabular-nums}
+.figs span{font-size:.72rem;color:var(--muted);text-transform:uppercase;letter-spacing:.04em}
+.chart-wrap{position:relative;margin-top:.6rem}
+.chart-wrap .ac{display:block;width:100%;height:auto}
+.ac-sm{display:none}
+@media (max-width:640px){.ac-lg{display:none}.ac-sm{display:block}}
+.ac .ph0{fill:#071322}.ac .ph1{fill:#0b1d33}.ac .ph2{fill:#11294a}.ac .ph3{fill:#1b3a63}.ac .ph4{fill:#24496f}
+.ac .ac-plain{fill:#0b1d33}
+.ac .ac-day{stroke:var(--border);stroke-width:1}
+.ac .ac-grid{stroke:#2a4a70;stroke-width:.7;stroke-dasharray:2 4}
+.ac .ac-t{fill:var(--muted);font:11px system-ui,sans-serif}
+.ac .ac-s{font-size:9px}
+.ac .ac-name{font-size:10px;paint-order:stroke;stroke:#0a1929;stroke-width:3px;stroke-linejoin:round}
+.ac .ac-low{stroke:var(--warn);stroke-width:1.2;stroke-dasharray:6 4}
+.ac .ac-crit{stroke:var(--bad);stroke-width:1.2;stroke-dasharray:6 4}
+.ac .ac-full{stroke:var(--good);stroke-width:1;stroke-dasharray:6 4;opacity:.7}
+.ac .ac-low-t{fill:var(--warn);font:10px system-ui,sans-serif}
+.ac .ac-crit-t{fill:var(--bad);font:10px system-ui,sans-serif}
+.ac .ac-full-t{fill:var(--good);font:10px system-ui,sans-serif}
+.ac .ac-v{fill:none;stroke:var(--text);stroke-width:2;stroke-linejoin:round}
+.ac .ac-dot{fill:var(--text)}
+.ac .ac-now{fill:var(--accent);stroke:var(--text);stroke-width:1.5}
+.ac .ac-strip{fill:var(--bg);opacity:.55}
+.ac .ac-sun{fill:#fbbf24;opacity:.85}
+.ac .ac-sun-t{fill:#fbbf24}
+.ac .ac-cloud{fill:#94a3b8;opacity:.75}
+.ac .ac-cloud-t{fill:#94a3b8}
+.ac .ac-cloudline{fill:none;stroke:#94a3b8;stroke-width:1.2;stroke-dasharray:3 2}
+.ac .ac-air{fill:none;stroke:var(--muted);stroke-width:1.4;stroke-dasharray:4 3}
+.ac .ac-dev{fill:none;stroke:var(--orange);stroke-width:1.6}
+.ac .ac-cross{stroke:var(--warn);stroke-width:1}
+.ac .fc-up{fill:var(--good);opacity:.85}.ac .fc-down{fill:var(--bad);opacity:.85}
+.legend{display:flex;flex-wrap:wrap;gap:.35rem .9rem;font-size:.75rem;color:var(--muted);margin-top:.5rem}
+.legend i{display:inline-block;width:12px;height:12px;border-radius:3px;vertical-align:-2px;margin-right:.3rem;border:1px solid var(--border)}
+.hover-tip{position:absolute;top:8px;pointer-events:none;background:#08131f;border:1px solid var(--border);border-radius:8px;
+  padding:.4rem .55rem;font-size:.75rem;white-space:nowrap;font-variant-numeric:tabular-nums;z-index:2}
+.ledger-wrap{overflow-x:auto;margin-top:.6rem}
+.ledger{width:100%;border-collapse:collapse;font-size:.82rem;font-variant-numeric:tabular-nums;min-width:40rem}
+.ledger th{color:var(--muted);font-weight:500;text-align:right;padding:.35rem .45rem;border-bottom:1px solid var(--border);
+  font-size:.7rem;text-transform:uppercase;letter-spacing:.04em}
+.ledger td{text-align:right;padding:.4rem .45rem;border-bottom:1px solid rgba(30,58,95,.6)}
+.ledger th:first-child,.ledger td:first-child{text-align:left}
+.ledger .pos{color:var(--good)}.ledger .neg{color:var(--bad)}
+.ledger .bar{display:inline-block;height:8px;border-radius:2px;background:#fbbf24;vertical-align:middle;margin-left:.35rem}
+.ledger tr.suspect td:first-child::after{content:" ⚠";color:var(--bad)}
+.an-cols{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,22rem),1fr));gap:1rem;align-items:start}
+.an-cols .card{margin:0}
+.insights p{margin:.45rem 0;font-size:.92rem}
+.fc .ac-t{font-size:10px}
+/* The site turns tables into stacked cards on phones. This one stays a
+   table, cut down to the day, its sun and cloud, and the net change. */
+@media (max-width:720px){
+  table.ledger{display:table;min-width:0}
+  .ledger thead{display:table-header-group}
+  .ledger tbody{display:table-row-group}
+  .ledger tr{display:table-row;border:0;border-radius:0;margin:0;padding:0}
+  .ledger th,.ledger td{display:table-cell;padding:.35rem .3rem}
+  .ledger .wo,.ledger .bar{display:none}
+}
+</style>
+
+<div class="card">
+  <div class="an-head">
+    <div>
+      <a class="small" href="/watches/{{$a.WatchID}}">← {{$a.Name}}</a>
+      <h2>Battery analysis</h2>
+      <div class="small">{{if $a.HasPosition}}Position from its advert: {{$a.Position}} · {{end}}times in UK time</div>
+    </div>
+    <nav class="ranges" aria-label="Range">
+      {{range $a.Ranges}}<a href="?days={{.Days}}"{{if .On}} aria-current="page"{{end}}>{{.Days}} days</a>{{end}}
+    </nav>
+  </div>
+  {{range $a.Notices}}<p class="notice">{{.}}</p>{{end}}
+</div>
+
+<div class="card">
+  <div class="row spread">
+    <span class="pill {{$a.Verdict.Class}}"><span class="dot"></span>{{$a.Verdict.Label}}</span>
+    <span class="small">Last {{$a.Days}} days</span>
+  </div>
+  <p style="margin:.6rem 0 0">{{$a.Verdict.Text}}</p>
+  {{with $a.Figures}}<div class="figs">{{range .}}<div><b>{{.Value}}</b><span>{{.Label}}</span></div>{{end}}</div>{{end}}
+</div>
+
+<div class="card">
+  <div class="row spread">
+    <h3 style="margin:0">Voltage{{if $a.HasPosition}}, daylight{{end}}{{if $a.Weather}} and weather{{end}}</h3>
+    {{if $a.HasPosition}}<span class="small">Shading shows night, the three twilights and day</span>{{end}}
+  </div>
+  <div class="chart-wrap" id="analyse-chart" data-hover="{{$a.HoverRaw}}">
+    <div class="ac-lg">{{$a.Chart}}</div>
+    <div class="ac-sm">{{$a.ChartSm}}</div>
+    <div class="hover-tip" id="analyse-tip" hidden></div>
+  </div>
+  <div class="legend">
+    {{if $a.HasPosition}}
+    <span><i style="background:#071322"></i>Night</span>
+    <span><i style="background:#0b1d33"></i>Astronomical twilight</span>
+    <span><i style="background:#11294a"></i>Nautical twilight</span>
+    <span><i style="background:#1b3a63"></i>Civil twilight</span>
+    <span><i style="background:#24496f"></i>Day</span>
+    {{end}}
+    {{if $a.Weather}}
+    <span><i style="background:#fbbf24;border-color:#fbbf24"></i>Sunlight reaching the ground</span>
+    <span><i style="background:#94a3b8;border-color:#94a3b8"></i>Cloud cover</span>
+    <span><i style="background:var(--muted);border-color:var(--muted)"></i>Outside air</span>
+    {{end}}
+    {{if $a.HasTemps}}<span><i style="background:var(--orange);border-color:var(--orange)"></i>Repeater temperature</span>{{end}}
+  </div>
+</div>
+
+{{if $a.Ledger}}
+<div class="card">
+  <div class="row spread">
+    <h3 style="margin:0">Day by day</h3>
+    <span class="small">Each row runs from one sunrise to the next: a day of charging and the night after it</span>
+  </div>
+  <div class="ledger-wrap">
+    <table class="ledger">
+      <thead><tr><th>Day</th><th class="wo">Sunrise</th><th class="wo">Sunset</th><th class="wo">Daylight</th>{{if $a.Weather}}<th>Cloud</th><th>Sun kWh/m²</th>{{end}}<th class="wo">Gain</th><th class="wo">Overnight</th><th>Net</th></tr></thead>
+      <tbody>
+      {{range $a.Ledger}}
+        <tr{{if .Suspect}} class="suspect" title="Plenty of sun but almost no charge"{{end}}>
+          <td>{{.Day}}</td><td class="wo">{{.Rise}}</td><td class="wo">{{.Set}}</td><td class="wo">{{.Daylight}}</td>
+          {{if $a.Weather}}<td>{{.Cloud}}</td><td>{{.Sun}}{{if .SunBar}}<span class="bar" style="width:{{.SunBar}}px"></span>{{end}}</td>{{end}}
+          <td class="wo {{.GainClass}}">{{.Gain}}</td><td class="wo {{.OvernightClass}}">{{.Overnight}}</td><td class="{{.NetClass}}">{{.Net}}</td>
+        </tr>
+      {{end}}
+      </tbody>
+    </table>
+  </div>
+  <p class="small" style="margin:.5rem 0 0">Gain is the rise from the morning low to the day's high. Overnight is the fall to the next morning's low. Net is one morning's low to the next.</p>
+</div>
+{{end}}
+
+{{if or $a.Insights $a.Forecast}}
+<div class="an-cols">
+  {{with $a.Insights}}
+  <div class="card insights">
+    <h3 style="margin:0">What this says</h3>
+    {{range .}}<p><b>{{.Lead}}</b> {{.Text}}</p>{{end}}
+  </div>
+  {{end}}
+  {{if $a.Forecast}}
+  <div class="card">
+    <div class="row spread"><h3 style="margin:0">Next 7 days</h3><span class="small">From the weather forecast</span></div>
+    <div class="chart-wrap">{{$a.Forecast}}</div>
+    <p class="small" style="margin:.5rem 0 0">{{$a.ForecastTxt}}</p>
+  </div>
+  {{end}}
+</div>
+{{end}}
+
+{{if $a.Weather}}<p class="small">Weather data by <a href="https://open-meteo.com/" target="_blank" rel="noopener">Open-Meteo.com</a> (CC BY 4.0), for the area around the repeater rather than its exact site. Sun times are worked out from its position. Forecasts are estimates.</p>{{end}}
+<script src="/static/analyse.js" defer></script>
+{{end}}

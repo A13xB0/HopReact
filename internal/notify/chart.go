@@ -21,6 +21,7 @@ import (
 
 	"hopreact/internal/alert"
 	"hopreact/internal/batteryview"
+	"hopreact/internal/sun"
 )
 
 // Chart size. Twice the size it shows at in Discord, so it stays sharp on
@@ -35,17 +36,28 @@ const shutOffMV = batteryview.ShutOffMV
 
 // Colours, matched to Discord's dark theme so the chart sits in the message.
 var (
-	cBG       = color.RGBA{0x1e, 0x1f, 0x22, 0xff}
-	cGrid     = color.RGBA{0x2b, 0x2d, 0x31, 0xff}
-	cAxis     = color.RGBA{0x4e, 0x50, 0x58, 0xff}
-	cMuted    = color.RGBA{0x94, 0x9b, 0xa4, 0xff}
-	cText     = color.RGBA{0xdb, 0xde, 0xe1, 0xff}
-	cLine     = color.RGBA{0x5a, 0xa9, 0xff, 0xff}
-	cBand     = color.RGBA{0x5a, 0xa9, 0xff, 0x29}
+	cBG    = color.RGBA{0x1e, 0x1f, 0x22, 0xff}
+	cGrid  = color.RGBA{0x2b, 0x2d, 0x31, 0xff}
+	cAxis  = color.RGBA{0x4e, 0x50, 0x58, 0xff}
+	cMuted = color.RGBA{0x94, 0x9b, 0xa4, 0xff}
+	cText  = color.RGBA{0xdb, 0xde, 0xe1, 0xff}
+	cLine  = color.RGBA{0x5a, 0xa9, 0xff, 0xff}
+	// Translucent, so non-premultiplied: as color.RGBA these values would
+	// be invalid and draw as a bright green smear.
+	cBand     = color.NRGBA{0x5a, 0xa9, 0xff, 0x40}
 	cLow      = color.RGBA{0xfa, 0xcc, 0x15, 0xff}
 	cCritical = color.RGBA{0xf8, 0x71, 0x71, 0xff}
 	cWhite    = color.RGBA{0xff, 0xff, 0xff, 0xff}
 )
+
+// phaseColours shade the day behind the readings, lighter as it gets
+// brighter, staying dark enough for the lines to read on top.
+var phaseColours = map[sun.Phase]color.RGBA{
+	sun.Astronomical: {0x20, 0x21, 0x26, 0xff},
+	sun.Nautical:     {0x22, 0x25, 0x2c, 0xff},
+	sun.Civil:        {0x25, 0x2a, 0x34, 0xff},
+	sun.Day:          {0x29, 0x31, 0x40, 0xff},
+}
 
 var (
 	fontsOnce sync.Once
@@ -83,6 +95,9 @@ type ChartInput struct {
 	Trend   alert.Trend
 	Levels  alert.BatteryLevels
 	Loc     *time.Location
+	// Spans shade night, twilight and day behind the readings. Empty
+	// when the repeater's position isn't known.
+	Spans []sun.Span
 }
 
 // BatteryChart draws a week of readings with the levels, and, when the
@@ -159,6 +174,21 @@ func BatteryChart(in ChartInput) ([]byte, error) {
 	img := image.NewRGBA(image.Rect(0, 0, chartW, chartH))
 	draw.Draw(img, img.Bounds(), &image.Uniform{cBG}, image.Point{}, draw.Src)
 	c := &canvas{img: img}
+
+	// Night, twilight and day, behind everything else. Night is the
+	// background itself.
+	for _, sp := range in.Spans {
+		col, ok := phaseColours[sp.Phase]
+		if !ok {
+			continue
+		}
+		x0 := math.Max(left, xAt(sp.Start))
+		x1 := math.Min(right, xAt(sp.End))
+		if x1 > x0 {
+			draw.Draw(img, image.Rect(int(math.Round(x0)), int(top), int(math.Round(x1)), int(bottom)),
+				&image.Uniform{col}, image.Point{}, draw.Src)
+		}
+	}
 
 	// Grid every 100 or 200 mV, labelled in volts.
 	step := 100.0

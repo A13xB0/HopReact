@@ -1,0 +1,320 @@
+package web
+
+import (
+	"context"
+	"encoding/json"
+	"io"
+	"log/slog"
+	"math"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"hopreact/internal/config"
+	"hopreact/internal/corescope"
+	"hopreact/internal/discord"
+	"hopreact/internal/store"
+	"hopreact/internal/sun"
+	"hopreact/internal/weather"
+)
+
+// November, when solar repeaters in the north struggle.
+var anNow = time.Date(2026, 11, 6, 20, 0, 0, 0, time.UTC)
+
+const (
+	anKey      = "38f6820f7e4dd88fed7697d822b552d141a3bd10ab45c239223f7e9aea6bba81"
+	anLat      = 54.90475
+	anLon      = -1.4499
+	anFromDays = 35
+)
+
+var anClouds = []float64{0.9, 0.3, 0.95, 0.5, 0.97, 0.45, 0.18, 0.8, 0.99, 0.66}
+
+func anCloud(t time.Time) float64 {
+	d := int(math.Floor(t.Sub(anNow.Add(-anFromDays*24*time.Hour)).Hours() / 24))
+	return anClouds[((d%len(anClouds))+len(anClouds))%len(anClouds)]
+}
+
+func anSun(t time.Time) float64 {
+	el := sun.Elevation(t, anLat, anLon)
+	if el <= 0 {
+		return 0
+	}
+	c := anCloud(t)
+	return 900 * math.Pow(math.Sin(el*math.Pi/180), 1.15) * (1 - 0.75*c*c)
+}
+
+// fakeScope serves a simulated solar repeater's battery, hourly.
+func fakeScope(t *testing.T, fail *atomic.Bool) *httptest.Server {
+	type sample struct {
+		Timestamp   string   `json:"timestamp"`
+		BatteryMV   int      `json:"battery_mv"`
+		Temperature *float64 `json:"temperature_c,omitempty"`
+	}
+	var all []sample
+	v := 3950.0
+	for tm := anNow.Add(-anFromDays * 24 * time.Hour); !tm.After(anNow); tm = tm.Add(10 * time.Minute) {
+		v += -0.29 + 45*anSun(tm.Add(5*time.Minute))/6/1000
+		v = math.Min(v, 4200)
+		if tm.Minute() == 0 {
+			temp := 9 + 4*math.Sin(float64(tm.Hour()-9)/24*2*math.Pi)
+			all = append(all, sample{Timestamp: tm.Format(time.RFC3339), BatteryMV: int(math.Round(v)), Temperature: &temp})
+		}
+	}
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if fail != nil && fail.Load() {
+			http.Error(w, "down", http.StatusBadGateway)
+			return
+		}
+		if !strings.Contains(r.URL.Path, anKey) {
+			http.NotFound(w, r)
+			return
+		}
+		days, _ := strconv.Atoi(r.URL.Query().Get("days"))
+		from := anNow.Add(-time.Duration(days) * 24 * time.Hour)
+		var out []sample
+		for _, s := range all {
+			if at, _ := time.Parse(time.RFC3339, s.Timestamp); !at.Before(from) {
+				out = append(out, s)
+			}
+		}
+		last := out[len(out)-1]
+		json.NewEncoder(w).Encode(map[string]any{"status": "ok", "latest_mv": last.BatteryMV,
+			"latest_ts": last.Timestamp, "samples": out})
+	}))
+}
+
+// fakeWeather serves Open-Meteo's hourly shape from the same simulation.
+func fakeWeather(t *testing.T, calls *atomic.Int32, fail *atomic.Bool) *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		if fail != nil && fail.Load() {
+			http.Error(w, "down", http.StatusServiceUnavailable)
+			return
+		}
+		q := r.URL.Query()
+		if q.Get("latitude") != "54.9" || q.Get("longitude") != "-1.4" {
+			t.Errorf("position sent to the weather service = %s, %s; want it rounded to 0.1°", q.Get("latitude"), q.Get("longitude"))
+		}
+		past, _ := strconv.Atoi(q.Get("past_days"))
+		day0 := anNow.Truncate(24 * time.Hour)
+		var times []int64
+		var temp, cloud, sunW []float64
+		for tm := day0.AddDate(0, 0, -past); tm.Before(day0.AddDate(0, 0, weather.ForecastDays)); tm = tm.Add(time.Hour) {
+			var s float64
+			for m := 5; m < 60; m += 10 {
+				s += anSun(tm.Add(-time.Hour + time.Duration(m)*time.Minute))
+			}
+			times = append(times, tm.Unix())
+			sunW = append(sunW, math.Round(s/6))
+			cloud = append(cloud, math.Round(100*anCloud(tm.Add(-time.Minute))))
+			temp = append(temp, 8)
+		}
+		json.NewEncoder(w).Encode(map[string]any{"hourly": map[string]any{
+			"time": times, "temperature_2m": temp, "cloud_cover": cloud, "shortwave_radiation": sunW}})
+	}))
+}
+
+type anFixture struct {
+	srv     *Server
+	st      *store.Store
+	h       http.Handler
+	cookie  *http.Cookie
+	watchID int64
+	wxCalls *atomic.Int32
+	wxFail  *atomic.Bool
+	csFail  *atomic.Bool
+}
+
+func newAnalyse(t *testing.T, withPosition bool) anFixture {
+	t.Helper()
+	st, err := store.Open(t.TempDir(), func() time.Time { return anNow })
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	f := anFixture{st: st, wxCalls: &atomic.Int32{}, wxFail: &atomic.Bool{}, csFail: &atomic.Bool{}}
+	cs := fakeScope(t, f.csFail)
+	t.Cleanup(cs.Close)
+	wx := fakeWeather(t, f.wxCalls, f.wxFail)
+	t.Cleanup(wx.Close)
+
+	cfg := config.Default()
+	cfg.Site.BaseURL = "http://localhost:8080"
+	cfg.Discord = config.DiscordConfig{ClientID: "c", ClientSecret: "s", BotToken: "b", GuildID: "g"}
+	cfg.Battery.Enabled, cfg.Battery.Weather = true, true
+	cfg.Battery.LowMV, cfg.Battery.CriticalMV = 3650, 3500
+	cfg.Battery.Timezone = "Europe/London"
+	cfg.CoreScope.APIURL = cs.URL
+	dc := discord.New("c", "s", "b", "g", cfg.Site.BaseURL+"/auth/callback", nil)
+	srv, err := New(st, dc, cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv.Scope = corescope.NewClient(cs.URL, 5*time.Second, nil)
+	srv.Weather = &weather.Service{Client: &weather.Client{BaseURL: wx.URL}, Cache: st, Now: st.Now}
+	f.srv, f.h = srv, srv.Routes()
+
+	obs := corescope.Observation{Kind: corescope.KindNode, Key: anKey, Name: "G0BAZ Washington", Role: "repeater", LastSeen: anNow}
+	if withPosition {
+		la, lo := anLat, anLon
+		obs.Lat, obs.Lon = &la, &lo
+	}
+	if _, err := st.UpsertTargets(context.Background(), []corescope.Observation{obs}); err != nil {
+		t.Fatal(err)
+	}
+	cookie, _, u := signIn(t, srv, st)
+	f.cookie = cookie
+	f.watchID = addWatch(t, st, u.ID, anKey)
+	if err := st.AddBatteryRule(context.Background(), u.ID, f.watchID); err != nil {
+		t.Fatal(err)
+	}
+	return f
+}
+
+func (f anFixture) get(t *testing.T, path string) (int, string) {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, path, nil)
+	req.AddCookie(f.cookie)
+	rec := httptest.NewRecorder()
+	f.h.ServeHTTP(rec, req)
+	return rec.Code, rec.Body.String()
+}
+
+func (f anFixture) path(q string) string {
+	return "/watches/" + itoa(f.watchID) + "/battery/analyse" + q
+}
+
+func TestAnalysePage(t *testing.T) {
+	f := newAnalyse(t, true)
+	code, body := f.get(t, f.path(""))
+	if code != http.StatusOK {
+		t.Fatalf("status %d: %s", code, body)
+	}
+	for _, want := range []string{
+		"Battery analysis", "G0BAZ Washington", "Position from its advert: 54.905, -1.450",
+		`class="ph0"`, `class="ph4"`, `class="ac-sun"`, `class="ac-cloud"`, `class="ac-dev"`,
+		"Day by day", "Sun to break even", "Break-even is about", "Next 7 days", "Open-Meteo.com",
+		`aria-current="page">7 days`, "/static/analyse.js",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("page is missing %q", want)
+		}
+	}
+	if n := strings.Count(body, "<tr>") + strings.Count(body, `<tr class="suspect"`); n < 8 {
+		t.Errorf("ledger has %d rows, want a header and 7 days", n)
+	}
+}
+
+func TestAnalyseRangeAndCache(t *testing.T) {
+	f := newAnalyse(t, true)
+	if code, _ := f.get(t, f.path("?days=7")); code != http.StatusOK {
+		t.Fatal(code)
+	}
+	if code, _ := f.get(t, f.path("?days=3")); code != http.StatusOK {
+		t.Fatal(code)
+	}
+	if n := f.wxCalls.Load(); n != 1 {
+		t.Fatalf("weather fetched %d times; a shorter range should come from the cache", n)
+	}
+	code, body := f.get(t, f.path("?days=30"))
+	if code != http.StatusOK || !strings.Contains(body, `aria-current="page">30 days`) {
+		t.Fatalf("30 days: status %d", code)
+	}
+	if n := f.wxCalls.Load(); n != 2 {
+		t.Fatalf("weather fetched %d times; a longer range needs one more fetch", n)
+	}
+	// Anything not offered falls back to a week.
+	if _, body := f.get(t, f.path("?days=9999")); !strings.Contains(body, `aria-current="page">7 days`) {
+		t.Fatal("an unknown range should show 7 days")
+	}
+}
+
+func TestAnalyseWithoutPosition(t *testing.T) {
+	f := newAnalyse(t, false)
+	code, body := f.get(t, f.path(""))
+	if code != http.StatusOK {
+		t.Fatal(code)
+	}
+	if !strings.Contains(body, "doesn&#39;t share its position") || strings.Contains(body, `class="ph0"`) {
+		t.Fatal("without a position the page should say so and draw no shading")
+	}
+	if f.wxCalls.Load() != 0 {
+		t.Fatal("no position, no weather call")
+	}
+}
+
+func TestAnalyseWeatherDown(t *testing.T) {
+	f := newAnalyse(t, true)
+	f.wxFail.Store(true)
+	code, body := f.get(t, f.path(""))
+	if code != http.StatusOK {
+		t.Fatal(code)
+	}
+	if !strings.Contains(body, "Weather is unavailable") || !strings.Contains(body, `class="ph4"`) {
+		t.Fatal("weather down: say so, keep the sun shading")
+	}
+	// Within the retry wait, no second call.
+	f.get(t, f.path(""))
+	if n := f.wxCalls.Load(); n != 1 {
+		t.Fatalf("weather called %d times during an outage", n)
+	}
+}
+
+func TestAnalyseCoreScopeDown(t *testing.T) {
+	f := newAnalyse(t, true)
+	f.csFail.Store(true)
+	code, body := f.get(t, f.path(""))
+	if code != http.StatusOK || !strings.Contains(body, "CoreScope didn&#39;t answer") {
+		t.Fatalf("status %d; the page should fall back to stored readings and say so", code)
+	}
+}
+
+func TestAnalyseOnlyYourOwnWatch(t *testing.T) {
+	f := newAnalyse(t, true)
+	other, err := f.st.UpsertUser(context.Background(), "d2", "bob", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := addWatch(t, f.st, other.ID, anKey)
+	if code, _ := f.get(t, "/watches/"+itoa(id)+"/battery/analyse"); code != http.StatusNotFound {
+		t.Fatalf("someone else's watch: status %d, want 404", code)
+	}
+}
+
+func TestWatchPageLinksToAnalysis(t *testing.T) {
+	f := newAnalyse(t, true)
+	if err := f.st.SaveBatteryReadings(context.Background(), store.BatteryReadings{Key: anKey,
+		Status: corescope.BatteryOK, LatestMV: 3940, LatestAt: anNow.Add(-time.Hour), FetchedAt: anNow,
+		Samples: []corescope.BatterySample{{At: anNow.Add(-time.Hour), MV: 3940}}}); err != nil {
+		t.Fatal(err)
+	}
+	_, body := f.get(t, "/watches/"+itoa(f.watchID))
+	if !strings.Contains(body, `href="/watches/`+itoa(f.watchID)+`/battery/analyse">Analyse battery`) {
+		t.Fatal("the battery card should link to the analysis")
+	}
+}
+
+// TestDumpAnalyse writes the page to $HOPREACT_DUMP for a look in a browser.
+func TestDumpAnalyse(t *testing.T) {
+	dir := os.Getenv("HOPREACT_DUMP")
+	if dir == "" {
+		t.Skip("set HOPREACT_DUMP to write pages")
+	}
+	f := newAnalyse(t, true)
+	for name, q := range map[string]string{"analyse.html": "", "analyse-30.html": "?days=30"} {
+		_, body := f.get(t, f.path(q))
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	js, _ := staticFS.ReadFile("static/analyse.js")
+	os.MkdirAll(filepath.Join(dir, "static"), 0o755)
+	os.WriteFile(filepath.Join(dir, "static", "analyse.js"), js, 0o644)
+}
